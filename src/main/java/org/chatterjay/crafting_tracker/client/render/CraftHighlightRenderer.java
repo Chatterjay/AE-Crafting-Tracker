@@ -1,0 +1,166 @@
+package org.chatterjay.crafting_tracker.client.render;
+
+import com.mojang.blaze3d.platform.GlStateManager;
+import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.vertex.VertexConsumer;
+import com.mojang.blaze3d.vertex.VertexFormat;
+
+import net.minecraft.client.Camera;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.client.renderer.RenderStateShard;
+import net.minecraft.client.renderer.RenderType;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.phys.Vec3;
+
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
+
+import org.chatterjay.crafting_tracker.Crafting_tracker;
+import org.chatterjay.crafting_tracker.api.CraftStatus;
+import org.chatterjay.crafting_tracker.client.ClientHighlightCache;
+import org.chatterjay.crafting_tracker.network.payloads.S2CCraftHighlightData.HighlightEntry;
+import org.joml.Matrix4f;
+
+@EventBusSubscriber(modid = Crafting_tracker.MODID, value = Dist.CLIENT)
+public class CraftHighlightRenderer {
+
+    @SuppressWarnings("deprecation")
+    private static final RenderType OVERLAY_NO_DEPTH = RenderType.create(
+            "ct_overlay_no_depth",
+            DefaultVertexFormat.POSITION_COLOR,
+            VertexFormat.Mode.QUADS,
+            256, false, false,
+            RenderType.CompositeState.builder()
+                    .setShaderState(new RenderStateShard.ShaderStateShard(
+                            () -> net.minecraft.client.renderer.GameRenderer.getPositionColorShader()))
+                    .setTextureState(new RenderStateShard.TextureStateShard(
+                            net.minecraft.client.renderer.texture.TextureAtlas.LOCATION_BLOCKS, false, false))
+                    .setDepthTestState(new RenderStateShard.DepthTestStateShard("always", 519))
+                    .setTransparencyState(new RenderStateShard.TransparencyStateShard(
+                            "src_to_one",
+                            () -> {
+                                RenderSystem.enableBlend();
+                                RenderSystem.blendFunc(
+                                        GlStateManager.SourceFactor.SRC_ALPHA,
+                                        GlStateManager.DestFactor.ONE);
+                            },
+                            () -> {
+                                RenderSystem.disableBlend();
+                                RenderSystem.defaultBlendFunc();
+                            }))
+                    .createCompositeState(true));
+
+    @SubscribeEvent
+    public static void onRenderLevelStage(RenderLevelStageEvent event) {
+        if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_PARTICLES) return;
+
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.level == null || mc.player == null) return;
+
+        var highlights = ClientHighlightCache.INSTANCE.getActiveHighlights();
+        if (highlights.isEmpty()) return;
+
+        Camera camera = mc.gameRenderer.getMainCamera();
+        Vec3 camPos = camera.getPosition();
+        PoseStack poseStack = event.getPoseStack();
+        MultiBufferSource.BufferSource bufferSource = mc.renderBuffers().bufferSource();
+
+        RenderSystem.disableDepthTest();
+        RenderSystem.depthMask(false);
+
+        poseStack.pushPose();
+        poseStack.translate(-camPos.x, -camPos.y, -camPos.z);
+
+        PoseStack.Pose poseEntry = poseStack.last();
+        Matrix4f poseMatrix = poseEntry.pose();
+
+        // Fill pass: outer glow + core fill in one batch (all vertices before endBatch)
+        OVERLAY_NO_DEPTH.setupRenderState();
+        VertexConsumer fillConsumer = bufferSource.getBuffer(OVERLAY_NO_DEPTH);
+        for (HighlightEntry entry : highlights) {
+            CraftStatus status = CraftStatus.values()[entry.statusOrdinal()];
+            int r = (status.color >> 16) & 0xFF;
+            int g = (status.color >> 8) & 0xFF;
+            int b = status.color & 0xFF;
+            renderBoxFill(fillConsumer, poseMatrix, entry.pos(), r, g, b, 30, 0.05f);
+            renderBoxFill(fillConsumer, poseMatrix, entry.pos(), r, g, b, 80, 0.005f);
+        }
+        bufferSource.endBatch(OVERLAY_NO_DEPTH);
+        OVERLAY_NO_DEPTH.clearRenderState();
+
+        // Pass 3: thick lines — wider for visibility
+        RenderSystem.lineWidth(3f);
+        VertexConsumer lineConsumer = bufferSource.getBuffer(RenderType.lines());
+        for (HighlightEntry entry : highlights) {
+            CraftStatus status = CraftStatus.values()[entry.statusOrdinal()];
+            int r = (status.color >> 16) & 0xFF;
+            int g = (status.color >> 8) & 0xFF;
+            int b = status.color & 0xFF;
+            renderBoxOutline(lineConsumer, poseMatrix, poseEntry, entry.pos(), r, g, b, 255);
+        }
+        bufferSource.endBatch(RenderType.lines());
+        RenderSystem.lineWidth(1f);
+
+        poseStack.popPose();
+        RenderSystem.depthMask(true);
+        RenderSystem.enableDepthTest();
+    }
+
+    private static void renderBoxOutline(VertexConsumer consumer, Matrix4f pose,
+                                          PoseStack.Pose poseEntry, BlockPos pos,
+                                          int r, int g, int b, int a) {
+        float x1 = pos.getX() + 0.001f, y1 = pos.getY() + 0.001f, z1 = pos.getZ() + 0.001f;
+        float x2 = x1 + 0.998f, y2 = y1 + 0.998f, z2 = z1 + 0.998f;
+        float cr = r / 255f, cg = g / 255f, cb = b / 255f, ca = a / 255f;
+
+        line(consumer, pose, poseEntry, x1, y1, z1, x2, y1, z1, cr, cg, cb, ca);
+        line(consumer, pose, poseEntry, x2, y1, z1, x2, y1, z2, cr, cg, cb, ca);
+        line(consumer, pose, poseEntry, x2, y1, z2, x1, y1, z2, cr, cg, cb, ca);
+        line(consumer, pose, poseEntry, x1, y1, z2, x1, y1, z1, cr, cg, cb, ca);
+        line(consumer, pose, poseEntry, x1, y2, z1, x2, y2, z1, cr, cg, cb, ca);
+        line(consumer, pose, poseEntry, x2, y2, z1, x2, y2, z2, cr, cg, cb, ca);
+        line(consumer, pose, poseEntry, x2, y2, z2, x1, y2, z2, cr, cg, cb, ca);
+        line(consumer, pose, poseEntry, x1, y2, z2, x1, y2, z1, cr, cg, cb, ca);
+        line(consumer, pose, poseEntry, x1, y1, z1, x1, y2, z1, cr, cg, cb, ca);
+        line(consumer, pose, poseEntry, x2, y1, z1, x2, y2, z1, cr, cg, cb, ca);
+        line(consumer, pose, poseEntry, x2, y1, z2, x2, y2, z2, cr, cg, cb, ca);
+        line(consumer, pose, poseEntry, x1, y1, z2, x1, y2, z2, cr, cg, cb, ca);
+    }
+
+    private static void renderBoxFill(VertexConsumer consumer, Matrix4f pose,
+                                       BlockPos pos, int r, int g, int b, int a,
+                                       float expand) {
+        float x1 = pos.getX() - expand, y1 = pos.getY() - expand, z1 = pos.getZ() - expand;
+        float x2 = pos.getX() + 1f + expand, y2 = pos.getY() + 1f + expand, z2 = pos.getZ() + 1f + expand;
+
+        quad(consumer, pose, x1, y1, z1, x2, y1, z1, x2, y1, z2, x1, y1, z2, r, g, b, a);
+        quad(consumer, pose, x1, y2, z1, x1, y2, z2, x2, y2, z2, x2, y2, z1, r, g, b, a);
+        quad(consumer, pose, x1, y1, z1, x1, y2, z1, x2, y2, z1, x2, y1, z1, r, g, b, a);
+        quad(consumer, pose, x2, y1, z2, x2, y2, z2, x1, y2, z2, x1, y1, z2, r, g, b, a);
+        quad(consumer, pose, x1, y1, z2, x1, y2, z2, x1, y2, z1, x1, y1, z1, r, g, b, a);
+        quad(consumer, pose, x2, y1, z1, x2, y2, z1, x2, y2, z2, x2, y1, z2, r, g, b, a);
+    }
+
+    private static void quad(VertexConsumer consumer, Matrix4f pose,
+                              float x1, float y1, float z1, float x2, float y2, float z2,
+                              float x3, float y3, float z3, float x4, float y4, float z4,
+                              int r, int g, int b, int a) {
+        consumer.addVertex(pose, x1, y1, z1).setColor(r, g, b, a);
+        consumer.addVertex(pose, x2, y2, z2).setColor(r, g, b, a);
+        consumer.addVertex(pose, x3, y3, z3).setColor(r, g, b, a);
+        consumer.addVertex(pose, x4, y4, z4).setColor(r, g, b, a);
+    }
+
+    private static void line(VertexConsumer consumer, Matrix4f pose, PoseStack.Pose poseEntry,
+                              float x1, float y1, float z1,
+                              float x2, float y2, float z2,
+                              float r, float g, float b, float a) {
+        consumer.addVertex(pose, x1, y1, z1).setColor(r, g, b, a).setNormal(poseEntry, 0f, 1f, 0f);
+        consumer.addVertex(pose, x2, y2, z2).setColor(r, g, b, a).setNormal(poseEntry, 0f, 1f, 0f);
+    }
+}

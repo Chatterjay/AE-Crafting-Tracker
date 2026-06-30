@@ -1,1 +1,6 @@
-{}
+{
+  "chat.crafting_tracker.enabled": "Crafting tracker highlight enabled",
+  "chat.crafting_tracker.disabled": "Crafting tracker highlight disabled",
+  "chat.crafting_tracker.status_enabled": "Crafting tracker: enabled",
+  "chat.crafting_tracker.status_disabled": "Crafting tracker: disabled"
+}

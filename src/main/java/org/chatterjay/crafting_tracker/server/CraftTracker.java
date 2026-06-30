@@ -1,0 +1,532 @@
+package org.chatterjay.crafting_tracker.server;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+
+import com.mojang.logging.LogUtils;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.chunk.LevelChunk;
+
+import net.neoforged.neoforge.network.PacketDistributor;
+
+import org.chatterjay.crafting_tracker.api.CraftStatus;
+import org.chatterjay.crafting_tracker.config.CTConfig;
+import org.chatterjay.crafting_tracker.network.payloads.S2CCraftHighlightData;
+import org.chatterjay.crafting_tracker.network.payloads.S2CCraftHighlightData.HighlightEntry;
+import org.slf4j.Logger;
+
+import appeng.api.crafting.IPatternDetails;
+import appeng.api.stacks.GenericStack;
+import appeng.api.config.LockCraftingMode;
+import appeng.api.networking.IGrid;
+import appeng.api.networking.IGridNode;
+import appeng.api.networking.IInWorldGridNodeHost;
+import appeng.api.networking.crafting.ICraftingCPU;
+import appeng.api.networking.crafting.ICraftingService;
+import appeng.helpers.patternprovider.PatternProviderLogicHost;
+
+public class CraftTracker {
+    private static final Logger LOGGER = LogUtils.getLogger();
+    private static final int MAX_MISSED = 10;
+    private static final long COOLDOWN_MS = 4000;
+
+    private static final Set<UUID> disabledPlayers = new HashSet<>();
+    private static final Map<BlockPos, TrackerEntry> entries = new HashMap<>();
+    private static final Map<BlockPos, Boolean> prevProviderBusy = new HashMap<>();
+    private static int scanCounter;
+
+    public static boolean isEnabledFor(UUID playerId) {
+        return CTConfig.highlightEnabled && !disabledPlayers.contains(playerId);
+    }
+
+    public static void setEnabledFor(UUID playerId, boolean enabled) {
+        if (enabled) {
+            disabledPlayers.remove(playerId);
+        } else {
+            disabledPlayers.add(playerId);
+        }
+    }
+
+    public static void onServerTick(MinecraftServer server) {
+        List<ServerPlayer> trackingPlayers = new ArrayList<>();
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (isEnabledFor(player.getUUID())) {
+                trackingPlayers.add(player);
+            }
+        }
+
+        long now = System.currentTimeMillis();
+        int radius = CTConfig.scanRadius;
+
+        if (trackingPlayers.isEmpty()) {
+            if (!entries.isEmpty()) {
+                LOGGER.info("No tracking players, clearing {} entries", entries.size());
+                entries.clear();
+            }
+            return;
+        }
+
+        // Phase 1: every tick — refresh state for known entries + quick-check nearby for busy providers
+        refreshEntries(server, now);
+        quickScan(server, now, trackingPlayers);
+
+        // Phase 2: periodic scan — discover providers and update state
+        scanCounter++;
+        boolean doScan = scanCounter % CTConfig.scanIntervalTicks == 0;
+
+        if (doScan) {
+            Set<BlockPos> seen = new HashSet<>();
+            Set<BlockPos> seenProviders = new HashSet<>();
+
+            for (ServerPlayer player : trackingPlayers) {
+                ServerLevel level = player.serverLevel();
+                BlockPos ppos = player.blockPosition();
+                int chunkRadius = (int) Math.ceil(radius / 16.0);
+                int cx0 = ppos.getX() >> 4;
+                int cz0 = ppos.getZ() >> 4;
+
+                scanChunks(level, ppos, cx0, cz0, chunkRadius, radius, now, seen, seenProviders);
+            }
+
+            // Clean up prevProviderBusy entries for providers no longer in range
+            prevProviderBusy.keySet().removeIf(k -> !seenProviders.contains(k));
+
+            // Keep entries still in cooldown (output targets or entries waiting to expire)
+            for (Map.Entry<BlockPos, TrackerEntry> e : entries.entrySet()) {
+                if (now < e.getValue().cooldownUntilMs) {
+                    seen.add(e.getKey());
+                }
+            }
+
+            int beforeSize = entries.size();
+            entries.entrySet().removeIf(e -> {
+                if (!seen.contains(e.getKey())) {
+                    e.getValue().missedCount++;
+                    if (e.getValue().missedCount > MAX_MISSED) {
+                        LOGGER.info("REMOVE entry {} (missed={})", e.getKey(), e.getValue().missedCount);
+                        return true;
+                    }
+                }
+                return false;
+            });
+            int removed = beforeSize - entries.size();
+            if (removed > 0 || beforeSize > 0) {
+                LOGGER.info("Scan: {} entries before, {} removed, {} remaining. seen={}",
+                        beforeSize, removed, entries.size(), seen.size());
+            }
+        }
+
+        // Phase 3: send highlights to each tracking player
+        if (!entries.isEmpty()) {
+            LOGGER.info("TICK: {} total entries, sending to {} players", entries.size(), trackingPlayers.size());
+        }
+
+        for (ServerPlayer player : trackingPlayers) {
+            ServerLevel level = player.serverLevel();
+            BlockPos ppos = player.blockPosition();
+            List<HighlightEntry> highlightEntries = new ArrayList<>();
+
+            for (Map.Entry<BlockPos, TrackerEntry> e : entries.entrySet()) {
+                BlockPos pos = e.getKey();
+                if (!pos.closerThan(ppos, radius)) continue;
+                if (!level.hasChunk(pos.getX() >> 4, pos.getZ() >> 4)) continue;
+
+                CraftStatus status = computeStatus(e.getValue(), now);
+                highlightEntries.add(new HighlightEntry(pos, status.ordinal()));
+            }
+
+            PacketDistributor.sendToPlayer(player, new S2CCraftHighlightData(highlightEntries));
+            if (!highlightEntries.isEmpty()) {
+                LOGGER.info("SEND to {}: {} highlights", player.getName().getString(), highlightEntries.size());
+            }
+        }
+    }
+
+    /**
+     * Per-tick lightweight scan of nearby chunks.
+     *
+     * Detection paths:
+     * 1) isBusy() or locked → confirmed entry (caught mid-push or output full)
+     * 2) Grid has a busy CPU AND the crafting system is requesting items that
+     *    match this provider's patterns → tentative entry. The pattern match
+     *    ensures only providers actually needed for the current craft light up,
+     *    not every provider on the grid.
+     */
+    private static void quickScan(MinecraftServer server, long now, List<ServerPlayer> trackingPlayers) {
+        int quickRadius = Math.min(CTConfig.scanRadius, 24);
+        int chunkRadius = (int) Math.ceil(quickRadius / 16.0);
+
+        for (ServerPlayer player : trackingPlayers) {
+            ServerLevel level = player.serverLevel();
+            BlockPos ppos = player.blockPosition();
+            int cx0 = ppos.getX() >> 4;
+            int cz0 = ppos.getZ() >> 4;
+
+            for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
+                for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
+                    int cx = cx0 + dx;
+                    int cz = cz0 + dz;
+                    if (!level.hasChunk(cx, cz)) continue;
+
+                    LevelChunk chunk = level.getChunk(cx, cz);
+                    for (Map.Entry<BlockPos, BlockEntity> beEntry : chunk.getBlockEntities().entrySet()) {
+                        BlockPos pos = beEntry.getKey();
+                        BlockEntity be = beEntry.getValue();
+                        if (!(be instanceof PatternProviderLogicHost host)) continue;
+                        if (!pos.closerThan(ppos, quickRadius)) continue;
+
+                        BlockPos immPos = pos.immutable();
+
+                        // Skip already tracked entries — refreshEntries handles them per-tick
+                        if (entries.containsKey(immPos)) continue;
+
+                        boolean busy = host.getLogic().isBusy();
+                        boolean locked = host.getLogic().getCraftingLockedReason() != LockCraftingMode.NONE;
+
+                        if (busy || locked) {
+                            LOGGER.info("QUICKSCAN: found active provider at {} (busy={}, locked={})", immPos, busy, locked);
+                            entries.put(immPos, new TrackerEntry(locked ? now : 0, false));
+                            prevProviderBusy.put(immPos, true);
+
+                            BlockPos outputPos = findOutputTarget(be, pos);
+                            if (outputPos != null) {
+                                entries.put(outputPos, new TrackerEntry(locked ? now : 0, true));
+                            }
+                        } else if (isProviderNeededByCraftingSystem(be, host)) {
+                            // Grid CPU is busy AND this provider's pattern outputs match
+                            // what the crafting system is requesting
+                            LOGGER.info("QUICKSCAN: needed provider at {} (patterns match craft request)", immPos);
+                            TrackerEntry entry = new TrackerEntry(0, false);
+                            entry.tentative = true;
+                            entry.cooldownUntilMs = now + 1000;
+                            entries.put(immPos, entry);
+
+                            BlockPos outputPos = findOutputTarget(be, pos);
+                            if (outputPos != null) {
+                                TrackerEntry ot = new TrackerEntry(0, true);
+                                ot.tentative = true;
+                                ot.cooldownUntilMs = now + 1000;
+                                entries.put(outputPos, ot);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static void refreshEntries(MinecraftServer server, long now) {
+        for (var e : entries.entrySet()) {
+            BlockPos pos = e.getKey();
+            TrackerEntry entry = e.getValue();
+
+            // Output targets: only refreshed during scans
+            if (entry.outputTarget) continue;
+
+            for (ServerLevel level : server.getAllLevels()) {
+                if (!level.hasChunk(pos.getX() >> 4, pos.getZ() >> 4)) continue;
+                BlockEntity be = level.getBlockEntity(pos);
+                if (!(be instanceof PatternProviderLogicHost host)) continue;
+
+                boolean busy = host.getLogic().isBusy();
+
+                if (busy) {
+                    // Provider is actively pushing — keep alive indefinitely
+                    entry.cooldownUntilMs = 0;
+                    entry.missedCount = 0;
+                    entry.tentative = false; // confirm if was tentative
+                    prevProviderBusy.put(pos, true); // signal this to the next scan
+
+                    LockCraftingMode lockReason = host.getLogic().getCraftingLockedReason();
+                    boolean locked = lockReason != LockCraftingMode.NONE;
+                    if (locked && entry.lockStartMs == 0) {
+                        entry.lockStartMs = now;
+                        LOGGER.info("REFRESH {}: busy+LOCKED, lockStart={}", pos, now);
+                    } else if (!locked) {
+                        entry.lockStartMs = 0;
+                    }
+
+                    // Also refresh the output target if it exists
+                    BlockPos outputPos = findOutputTarget(be, pos);
+                    if (outputPos != null) {
+                        TrackerEntry ot = entries.get(outputPos);
+                        if (ot != null) {
+                            ot.cooldownUntilMs = 0;
+                            ot.missedCount = 0;
+                        }
+                    }
+                } else {
+                    // For tentative entries, don't extend via CPU check — let them expire
+                    // unless confirmed by isBusy() or lock in a subsequent tick
+                    if (!entry.tentative) {
+                        boolean cpuBusy = isGridCpuBusy(be);
+
+                        if (cpuBusy) {
+                            // CPU still running for this provider's grid — keep alive
+                            entry.missedCount = 0;
+                            entry.lockStartMs = 0;
+                            if (entry.cooldownUntilMs == 0 || entry.cooldownUntilMs - now < COOLDOWN_MS / 2) {
+                                entry.cooldownUntilMs = now + COOLDOWN_MS;
+                            }
+                            // Also sync output target
+                            syncOutputTarget(be, pos, entry.cooldownUntilMs);
+                        } else if (now < entry.cooldownUntilMs) {
+                            // Normal cooldown (no CPU)
+                            entry.missedCount = 0;
+                        } else {
+                            // Idle, no CPU, no cooldown — will be cleaned up next scan
+                            entry.lockStartMs = 0;
+                        }
+                    } else if (now < entry.cooldownUntilMs) {
+                        // Tentative entry still in its short cooldown
+                        entry.missedCount = 0;
+                    } else {
+                        entry.lockStartMs = 0;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    private static void scanChunks(ServerLevel level, BlockPos ppos,
+                                    int cx0, int cz0, int chunkRadius,
+                                    int radius, long now, Set<BlockPos> seen,
+                                    Set<BlockPos> seenProviders) {
+        for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
+            for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
+                int cx = cx0 + dx;
+                int cz = cz0 + dz;
+                if (!level.hasChunk(cx, cz)) continue;
+
+                LevelChunk chunk = level.getChunk(cx, cz);
+                for (Map.Entry<BlockPos, BlockEntity> beEntry : chunk.getBlockEntities().entrySet()) {
+                    BlockPos pos = beEntry.getKey();
+                    BlockEntity be = beEntry.getValue();
+                    if (!pos.closerThan(ppos, radius)) continue;
+                    if (!(be instanceof PatternProviderLogicHost host)) continue;
+
+                    BlockPos immPos = pos.immutable();
+                    seenProviders.add(immPos);
+                    boolean busy = host.getLogic().isBusy();
+                    LockCraftingMode lockReason = host.getLogic().getCraftingLockedReason();
+                    boolean locked = lockReason != LockCraftingMode.NONE;
+                    boolean active = busy || locked;
+
+                    boolean wasActive = prevProviderBusy.getOrDefault(immPos, false);
+                    prevProviderBusy.put(immPos, active);
+
+                    TrackerEntry existing = entries.get(immPos);
+
+                    if (active) {
+                        LOGGER.info("SCAN provider {}: busy={}, locked={}", immPos, busy, locked);
+                        seen.add(immPos);
+
+                        if (existing == null) {
+                            entries.put(immPos, new TrackerEntry(locked ? now : 0, false));
+                        } else {
+                            existing.missedCount = 0;
+                            existing.cooldownUntilMs = 0;
+                            existing.tentative = false;
+                            if (locked && existing.lockStartMs == 0) {
+                                existing.lockStartMs = now;
+                            } else if (!locked) {
+                                existing.lockStartMs = 0;
+                            }
+                        }
+
+                        // Output target
+                        BlockPos outputPos = findOutputTarget(be, pos);
+                        if (outputPos != null) {
+                            seen.add(outputPos);
+                            TrackerEntry otExisting = entries.get(outputPos);
+                            if (otExisting == null) {
+                                entries.put(outputPos, new TrackerEntry(locked ? now : 0, true));
+                            } else {
+                                otExisting.missedCount = 0;
+                                otExisting.cooldownUntilMs = 0;
+                                otExisting.tentative = false;
+                                if (locked && otExisting.lockStartMs == 0) {
+                                    otExisting.lockStartMs = now;
+                                } else if (!locked) {
+                                    otExisting.lockStartMs = 0;
+                                }
+                            }
+                        }
+                    } else {
+                        // Provider is idle now
+                        if (existing != null) {
+                            if (wasActive) {
+                                // Was active last scan, now idle — transition detected
+                                LOGGER.info("SCAN provider {}: was active, now idle — cooldown start", immPos);
+                                existing.cooldownUntilMs = now + COOLDOWN_MS;
+                                existing.missedCount = 0;
+                                seen.add(immPos);
+
+                                BlockPos outputPos = findOutputTarget(be, pos);
+                                if (outputPos != null) {
+                                    TrackerEntry ot = entries.get(outputPos);
+                                    if (ot != null) {
+                                        ot.cooldownUntilMs = now + COOLDOWN_MS;
+                                        ot.missedCount = 0;
+                                        seen.add(outputPos);
+                                    }
+                                }
+                            } else if (now < existing.cooldownUntilMs) {
+                                // Still in cooldown
+                                seen.add(immPos);
+                            }
+                        } else if (wasActive) {
+                            // No entry but was active last scan — job finished between scans!
+                            LOGGER.info("SCAN provider {}: was active last scan, new entry with cooldown", immPos);
+                            TrackerEntry entry = new TrackerEntry(0, false);
+                            entry.cooldownUntilMs = now + COOLDOWN_MS;
+                            entries.put(immPos, entry);
+                            seen.add(immPos);
+
+                            BlockPos outputPos = findOutputTarget(be, pos);
+                            if (outputPos != null) {
+                                TrackerEntry ot = new TrackerEntry(0, true);
+                                ot.cooldownUntilMs = now + COOLDOWN_MS;
+                                entries.put(outputPos, ot);
+                                seen.add(outputPos);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Checks if the provider's grid has a busy CPU AND the crafting system is
+     * requesting items that match this provider's pattern outputs. This is used
+     * to detect providers that are needed for the current crafting job, even
+     * when isBusy() returns false (single-tick dispatch already completed).
+     */
+    private static boolean isProviderNeededByCraftingSystem(BlockEntity be, PatternProviderLogicHost host) {
+        try {
+            IGridNode node = getGridNode(be);
+            if (node == null) return false;
+            IGrid grid = node.getGrid();
+            if (grid == null) return false;
+            ICraftingService cs = grid.getCraftingService();
+            if (cs == null) return false;
+
+            // First check: is the grid's crafting CPU busy?
+            boolean cpuBusy = false;
+            for (ICraftingCPU cpu : cs.getCpus()) {
+                if (cpu.isBusy()) {
+                    cpuBusy = true;
+                    break;
+                }
+            }
+            if (!cpuBusy) return false;
+
+            // Second check: are any of this provider's pattern outputs being requested?
+            for (IPatternDetails pattern : host.getLogic().getAvailablePatterns()) {
+                GenericStack output = pattern.getPrimaryOutput();
+                if (output != null && cs.isRequesting(output.what())) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    private static boolean isGridCpuBusy(BlockEntity be) {
+        if (be == null || be.getLevel() == null) return false;
+        try {
+            IGridNode node = getGridNode(be);
+            if (node == null) return false;
+            IGrid grid = node.getGrid();
+            if (grid == null) return false;
+            ICraftingService cs = grid.getCraftingService();
+            if (cs == null) return false;
+            for (ICraftingCPU cpu : cs.getCpus()) {
+                if (cpu.isBusy()) return true;
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    private static IGridNode getGridNode(BlockEntity be) {
+        if (!(be instanceof IInWorldGridNodeHost host)) return null;
+        IGridNode node = host.getGridNode(null);
+        if (node != null) return node;
+        for (var dir : net.minecraft.core.Direction.values()) {
+            node = host.getGridNode(dir);
+            if (node != null) return node;
+        }
+        return null;
+    }
+
+    private static void syncOutputTarget(BlockEntity be, BlockPos providerPos, long cooldownUntilMs) {
+        BlockPos outputPos = findOutputTarget(be, providerPos);
+        if (outputPos != null) {
+            TrackerEntry ot = entries.get(outputPos);
+            if (ot != null) {
+                ot.cooldownUntilMs = cooldownUntilMs;
+                ot.missedCount = 0;
+            }
+        }
+    }
+
+    private static BlockPos findOutputTarget(BlockEntity be, BlockPos pos) {
+        var state = be.getBlockState();
+        if (state.hasProperty(BlockStateProperties.FACING)) {
+            return pos.relative(state.getValue(BlockStateProperties.FACING).getOpposite());
+        }
+        for (var dir : net.minecraft.core.Direction.values()) {
+            BlockPos adj = pos.relative(dir);
+            if (be.getLevel() != null && be.getLevel().getBlockEntity(adj) != null) {
+                return adj;
+            }
+        }
+        return null;
+    }
+
+    private static CraftStatus computeStatus(TrackerEntry entry, long now) {
+        if (entry.lockStartMs == 0) return CraftStatus.ACTIVE;
+
+        long lockDurationMs = now - entry.lockStartMs;
+        long stuckMs = CTConfig.stuckThresholdSeconds * 1000L;
+        long stallMs = CTConfig.stallThresholdSeconds * 1000L;
+
+        CraftStatus status;
+        if (lockDurationMs >= stuckMs) status = CraftStatus.STUCK;
+        else if (lockDurationMs >= stallMs) status = CraftStatus.STALLED;
+        else status = CraftStatus.ACTIVE;
+
+        if (status != CraftStatus.ACTIVE) {
+            LOGGER.info("STATUS: lockDuration={}ms (stall={}ms, stuck={}ms) -> {}", lockDurationMs, stallMs, stuckMs, status);
+        }
+        return status;
+    }
+
+    private static class TrackerEntry {
+        long lockStartMs;
+        int missedCount;
+        long cooldownUntilMs;
+        final boolean outputTarget;
+        boolean tentative; // created via pattern-match, not confirmed by isBusy/locked
+
+        TrackerEntry(long lockStartMs, boolean outputTarget) {
+            this.lockStartMs = lockStartMs;
+            this.outputTarget = outputTarget;
+        }
+    }
+}

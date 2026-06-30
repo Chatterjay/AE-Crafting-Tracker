@@ -7,7 +7,16 @@ import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.config.ModConfig;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.registries.DeferredRegister;
+
+import org.chatterjay.crafting_tracker.config.CTConfig;
+import org.chatterjay.crafting_tracker.server.CraftTracker;
+import org.chatterjay.crafting_tracker.server.CraftTrackerCommand;
+import org.chatterjay.crafting_tracker.server.CraftTrackerNetwork;
 import org.slf4j.Logger;
 
 @Mod(Crafting_tracker.MODID)
@@ -24,6 +33,14 @@ public class Crafting_tracker {
         ITEMS.register(modEventBus);
         CREATIVE_MODE_TABS.register(modEventBus);
 
-        modContainer.registerConfig(ModConfig.Type.COMMON, Config.SPEC);
+        modContainer.registerConfig(ModConfig.Type.COMMON, CTConfig.SPEC);
+
+        modEventBus.addListener(RegisterPayloadHandlersEvent.class,
+                (event) -> CraftTrackerNetwork.register(event));
+
+        NeoForge.EVENT_BUS.addListener(ServerTickEvent.Post.class,
+                (event) -> CraftTracker.onServerTick(event.getServer()));
+        NeoForge.EVENT_BUS.addListener(RegisterCommandsEvent.class,
+                (event) -> CraftTrackerCommand.register(event.getDispatcher()));
     }
 }
