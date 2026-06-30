@@ -76,7 +76,6 @@ public class CraftTracker {
 
         if (trackingPlayers.isEmpty()) {
             if (!entries.isEmpty()) {
-                LOGGER.info("No tracking players, clearing {} entries", entries.size());
                 entries.clear();
             }
             return;
@@ -119,24 +118,15 @@ public class CraftTracker {
                 if (!seen.contains(e.getKey())) {
                     e.getValue().missedCount++;
                     if (e.getValue().missedCount > MAX_MISSED) {
-                        LOGGER.info("REMOVE entry {} (missed={})", e.getKey(), e.getValue().missedCount);
                         return true;
                     }
                 }
                 return false;
             });
             int removed = beforeSize - entries.size();
-            if (removed > 0 || beforeSize > 0) {
-                LOGGER.info("Scan: {} entries before, {} removed, {} remaining. seen={}",
-                        beforeSize, removed, entries.size(), seen.size());
-            }
         }
 
         // Phase 3: send highlights to each tracking player
-        if (!entries.isEmpty()) {
-            LOGGER.info("TICK: {} total entries, sending to {} players", entries.size(), trackingPlayers.size());
-        }
-
         for (ServerPlayer player : trackingPlayers) {
             ServerLevel level = player.serverLevel();
             BlockPos ppos = player.blockPosition();
@@ -152,9 +142,6 @@ public class CraftTracker {
             }
 
             PacketDistributor.sendToPlayer(player, new S2CCraftHighlightData(highlightEntries));
-            if (!highlightEntries.isEmpty()) {
-                LOGGER.info("SEND to {}: {} highlights", player.getName().getString(), highlightEntries.size());
-            }
         }
     }
 
@@ -190,7 +177,6 @@ public class CraftTracker {
                         boolean locked = host.getLogic().getCraftingLockedReason() != LockCraftingMode.NONE;
 
                         if (busy || locked) {
-                            LOGGER.info("QUICKSCAN: found active provider at {} (busy={}, locked={})", immPos, busy, locked);
                             TrackerEntry entry = new TrackerEntry(locked ? now : 0);
                             entry.outputItemId = getProviderOutputItem(be, host);
                             entries.put(immPos, entry);
@@ -198,7 +184,6 @@ public class CraftTracker {
                         } else {
                             ResourceLocation itemId = getProviderOutputItem(be, host);
                             if (itemId != null) {
-                                LOGGER.info("QUICKSCAN: needed provider at {} (patterns match craft request)", immPos);
                                 TrackerEntry entry = new TrackerEntry(0);
                                 entry.outputItemId = itemId;
                                 entry.tentative = true;
@@ -237,19 +222,23 @@ public class CraftTracker {
 
                     LockCraftingMode lockReason = host.getLogic().getCraftingLockedReason();
                     boolean locked = lockReason != LockCraftingMode.NONE;
+
+                    // Track continuous busy time for output-full detection (busy but not locked)
+                    if (!locked && entry.busyStartMs == 0) {
+                        entry.busyStartMs = now;
+                    }
                     if (locked && entry.lockStartMs == 0) {
                         entry.lockStartMs = now;
-                        LOGGER.info("REFRESH {}: busy+LOCKED, lockStart={}", pos, now);
                     } else if (!locked) {
                         entry.lockStartMs = 0;
                     }
                 } else {
+                    entry.busyStartMs = 0;
                     if (!entry.tentative) {
                         boolean cpuBusy = isGridCpuBusy(be);
 
                         if (cpuBusy) {
                             entry.missedCount = 0;
-                            entry.lockStartMs = 0;
                             ResourceLocation itemId = getProviderOutputItem(be, host);
                             if (itemId != null) {
                                 entry.outputItemId = itemId;
@@ -312,13 +301,15 @@ public class CraftTracker {
                     TrackerEntry existing = entries.get(immPos);
 
                     if (active) {
-                        LOGGER.info("SCAN provider {}: busy={}, locked={}", immPos, busy, locked);
                         seen.add(immPos);
 
                         ResourceLocation itemId = getProviderOutputItem(be, host);
 
                         if (existing == null) {
                             TrackerEntry entry = new TrackerEntry(locked ? now : 0);
+                            if (!locked) {
+                                entry.busyStartMs = now;
+                            }
                             entry.outputItemId = itemId;
                             entries.put(immPos, entry);
                         } else {
@@ -327,6 +318,9 @@ public class CraftTracker {
                             existing.tentative = false;
                             if (itemId != null) {
                                 existing.outputItemId = itemId;
+                            }
+                            if (!locked && existing.busyStartMs == 0) {
+                                existing.busyStartMs = now;
                             }
                             if (locked && existing.lockStartMs == 0) {
                                 existing.lockStartMs = now;
@@ -337,8 +331,8 @@ public class CraftTracker {
                     } else {
                         // Provider is idle now
                         if (existing != null) {
+                            existing.busyStartMs = 0;
                             if (wasActive) {
-                                LOGGER.info("SCAN provider {}: was active, now idle — cooldown start", immPos);
                                 existing.cooldownUntilMs = now + COOLDOWN_MS;
                                 existing.missedCount = 0;
                                 seen.add(immPos);
@@ -351,7 +345,6 @@ public class CraftTracker {
                                 seen.add(immPos);
                             }
                         } else if (wasActive) {
-                            LOGGER.info("SCAN provider {}: was active last scan, new entry with cooldown", immPos);
                             TrackerEntry entry = new TrackerEntry(0);
                             entry.outputItemId = getProviderOutputItem(be, host);
                             entry.cooldownUntilMs = now + COOLDOWN_MS;
@@ -445,25 +438,27 @@ public class CraftTracker {
     }
 
     private static CraftStatus computeStatus(TrackerEntry entry, long now) {
-        if (entry.lockStartMs == 0) return CraftStatus.ACTIVE;
+        long startMs;
+        if (entry.lockStartMs != 0) {
+            startMs = entry.lockStartMs;
+        } else if (entry.busyStartMs != 0) {
+            startMs = entry.busyStartMs;
+        } else {
+            return CraftStatus.ACTIVE;
+        }
 
-        long lockDurationMs = now - entry.lockStartMs;
+        long durationMs = now - startMs;
         long stuckMs = CTConfig.stuckThresholdSeconds * 1000L;
         long stallMs = CTConfig.stallThresholdSeconds * 1000L;
 
-        CraftStatus status;
-        if (lockDurationMs >= stuckMs) status = CraftStatus.STUCK;
-        else if (lockDurationMs >= stallMs) status = CraftStatus.STALLED;
-        else status = CraftStatus.ACTIVE;
-
-        if (status != CraftStatus.ACTIVE) {
-            LOGGER.info("STATUS: lockDuration={}ms (stall={}ms, stuck={}ms) -> {}", lockDurationMs, stallMs, stuckMs, status);
-        }
-        return status;
+        if (durationMs >= stuckMs) return CraftStatus.STUCK;
+        if (durationMs >= stallMs) return CraftStatus.STALLED;
+        return CraftStatus.ACTIVE;
     }
 
     private static class TrackerEntry {
         long lockStartMs;
+        long busyStartMs; // when busy+!locked started (output full detection), 0 = not busy
         int missedCount;
         long cooldownUntilMs;
         boolean tentative;
