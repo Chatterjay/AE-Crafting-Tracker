@@ -3,6 +3,8 @@ package org.chatterjay.crafting_tracker.network.payloads;
 import java.util.ArrayList;
 import java.util.List;
 
+import javax.annotation.Nullable;
+
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
@@ -20,7 +22,7 @@ public record S2CCraftHighlightData(List<HighlightEntry> entries) implements Cus
     public static final StreamCodec<FriendlyByteBuf, S2CCraftHighlightData> STREAM_CODEC =
             StreamCodec.ofMember(S2CCraftHighlightData::write, S2CCraftHighlightData::new);
 
-    public record HighlightEntry(BlockPos pos, int statusOrdinal) {}
+    public record HighlightEntry(BlockPos pos, int statusOrdinal, @Nullable ResourceLocation itemId) {}
 
     public S2CCraftHighlightData(FriendlyByteBuf buf) {
         this(readEntries(buf));
@@ -31,6 +33,10 @@ public record S2CCraftHighlightData(List<HighlightEntry> entries) implements Cus
         for (HighlightEntry entry : entries) {
             buf.writeBlockPos(entry.pos());
             buf.writeVarInt(entry.statusOrdinal());
+            buf.writeBoolean(entry.itemId() != null);
+            if (entry.itemId() != null) {
+                buf.writeResourceLocation(entry.itemId());
+            }
         }
     }
 
@@ -38,7 +44,10 @@ public record S2CCraftHighlightData(List<HighlightEntry> entries) implements Cus
         int size = buf.readVarInt();
         List<HighlightEntry> list = new ArrayList<>(size);
         for (int i = 0; i < size; i++) {
-            list.add(new HighlightEntry(buf.readBlockPos(), buf.readVarInt()));
+            BlockPos pos = buf.readBlockPos();
+            int ordinal = buf.readVarInt();
+            ResourceLocation itemId = buf.readBoolean() ? buf.readResourceLocation() : null;
+            list.add(new HighlightEntry(pos, ordinal, itemId));
         }
         return list;
     }

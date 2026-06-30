@@ -12,7 +12,14 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderStateShard;
 import net.minecraft.client.renderer.RenderType;
+import net.minecraft.client.renderer.texture.TextureAtlas;
+import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+import net.minecraft.client.resources.model.BakedModel;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.phys.Vec3;
 
 import net.neoforged.api.distmarker.Dist;
@@ -55,6 +62,21 @@ public class CraftHighlightRenderer {
                             }))
                     .createCompositeState(true));
 
+    @SuppressWarnings("deprecation")
+    private static final RenderType SPRITE_NO_DEPTH = RenderType.create(
+            "ct_sprite_no_depth",
+            DefaultVertexFormat.POSITION_TEX,
+            VertexFormat.Mode.QUADS,
+            256, false, false,
+            RenderType.CompositeState.builder()
+                    .setShaderState(new RenderStateShard.ShaderStateShard(
+                            () -> net.minecraft.client.renderer.GameRenderer.getPositionTexShader()))
+                    .setTextureState(new RenderStateShard.TextureStateShard(
+                            TextureAtlas.LOCATION_BLOCKS, false, false))
+                    .setDepthTestState(new RenderStateShard.DepthTestStateShard("always", 519))
+                    .setTransparencyState(RenderStateShard.TRANSLUCENT_TRANSPARENCY)
+                    .createCompositeState(true));
+
     @SubscribeEvent
     public static void onRenderLevelStage(RenderLevelStageEvent event) {
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_PARTICLES) return;
@@ -80,7 +102,6 @@ public class CraftHighlightRenderer {
         Matrix4f poseMatrix = poseEntry.pose();
 
         // Fill pass: outer glow + core fill in one batch (all vertices before endBatch)
-        OVERLAY_NO_DEPTH.setupRenderState();
         VertexConsumer fillConsumer = bufferSource.getBuffer(OVERLAY_NO_DEPTH);
         for (HighlightEntry entry : highlights) {
             CraftStatus status = CraftStatus.values()[entry.statusOrdinal()];
@@ -91,7 +112,18 @@ public class CraftHighlightRenderer {
             renderBoxFill(fillConsumer, poseMatrix, entry.pos(), r, g, b, 80, 0.005f);
         }
         bufferSource.endBatch(OVERLAY_NO_DEPTH);
-        OVERLAY_NO_DEPTH.clearRenderState();
+
+        // Item sprite pass: billboard sprite in center of each provider
+        VertexConsumer spriteConsumer = bufferSource.getBuffer(SPRITE_NO_DEPTH);
+        for (HighlightEntry entry : highlights) {
+            if (entry.itemId() == null) continue;
+            ItemStack displayStack = new ItemStack(BuiltInRegistries.ITEM.get(entry.itemId()));
+            if (displayStack.isEmpty()) continue;
+            BakedModel model = mc.getItemRenderer().getModel(displayStack, mc.level, mc.player, 0);
+            TextureAtlasSprite sprite = model.getParticleIcon();
+            renderItemSprite(spriteConsumer, poseStack, entry.pos(), camera, sprite);
+        }
+        bufferSource.endBatch(SPRITE_NO_DEPTH);
 
         // Pass 3: thick lines — wider for visibility
         RenderSystem.lineWidth(3f);
@@ -162,5 +194,24 @@ public class CraftHighlightRenderer {
                               float r, float g, float b, float a) {
         consumer.addVertex(pose, x1, y1, z1).setColor(r, g, b, a).setNormal(poseEntry, 0f, 1f, 0f);
         consumer.addVertex(pose, x2, y2, z2).setColor(r, g, b, a).setNormal(poseEntry, 0f, 1f, 0f);
+    }
+
+    private static void renderItemSprite(VertexConsumer consumer, PoseStack poseStack,
+                                          BlockPos pos, Camera camera, TextureAtlasSprite sprite) {
+        float s = 0.35f;
+        float u0 = sprite.getU0(), u1 = sprite.getU1();
+        float v0 = sprite.getV0(), v1 = sprite.getV1();
+
+        poseStack.pushPose();
+        poseStack.translate(pos.getX() + 0.5, pos.getY() + 0.35, pos.getZ() + 0.5);
+        poseStack.mulPose(camera.rotation());
+
+        Matrix4f matrix = poseStack.last().pose();
+        consumer.addVertex(matrix, -s, -s, 0).setUv(u0, v1);
+        consumer.addVertex(matrix, +s, -s, 0).setUv(u1, v1);
+        consumer.addVertex(matrix, +s, +s, 0).setUv(u1, v0);
+        consumer.addVertex(matrix, -s, +s, 0).setUv(u0, v0);
+
+        poseStack.popPose();
     }
 }

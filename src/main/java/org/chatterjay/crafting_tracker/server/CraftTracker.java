@@ -8,10 +8,14 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import javax.annotation.Nullable;
+
 import com.mojang.logging.LogUtils;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -27,6 +31,7 @@ import org.chatterjay.crafting_tracker.network.payloads.S2CCraftHighlightData.Hi
 import org.slf4j.Logger;
 
 import appeng.api.crafting.IPatternDetails;
+import appeng.api.stacks.AEKey;
 import appeng.api.stacks.GenericStack;
 import appeng.api.config.LockCraftingMode;
 import appeng.api.networking.IGrid;
@@ -143,7 +148,7 @@ public class CraftTracker {
                 if (!level.hasChunk(pos.getX() >> 4, pos.getZ() >> 4)) continue;
 
                 CraftStatus status = computeStatus(e.getValue(), now);
-                highlightEntries.add(new HighlightEntry(pos, status.ordinal()));
+                highlightEntries.add(new HighlightEntry(pos, status.ordinal(), e.getValue().outputItemId));
             }
 
             PacketDistributor.sendToPlayer(player, new S2CCraftHighlightData(highlightEntries));
@@ -186,14 +191,20 @@ public class CraftTracker {
 
                         if (busy || locked) {
                             LOGGER.info("QUICKSCAN: found active provider at {} (busy={}, locked={})", immPos, busy, locked);
-                            entries.put(immPos, new TrackerEntry(locked ? now : 0));
-                            prevProviderBusy.put(immPos, true);
-                        } else if (isProviderNeededByCraftingSystem(be, host)) {
-                            LOGGER.info("QUICKSCAN: needed provider at {} (patterns match craft request)", immPos);
-                            TrackerEntry entry = new TrackerEntry(0);
-                            entry.tentative = true;
-                            entry.cooldownUntilMs = now + 1000;
+                            TrackerEntry entry = new TrackerEntry(locked ? now : 0);
+                            entry.outputItemId = getProviderOutputItem(be, host);
                             entries.put(immPos, entry);
+                            prevProviderBusy.put(immPos, true);
+                        } else {
+                            ResourceLocation itemId = getProviderOutputItem(be, host);
+                            if (itemId != null) {
+                                LOGGER.info("QUICKSCAN: needed provider at {} (patterns match craft request)", immPos);
+                                TrackerEntry entry = new TrackerEntry(0);
+                                entry.outputItemId = itemId;
+                                entry.tentative = true;
+                                entry.cooldownUntilMs = now + 1000;
+                                entries.put(immPos, entry);
+                            }
                         }
                     }
                 }
@@ -219,6 +230,11 @@ public class CraftTracker {
                     entry.tentative = false;
                     prevProviderBusy.put(pos, true);
 
+                    ResourceLocation itemId = getProviderOutputItem(be, host);
+                    if (itemId != null) {
+                        entry.outputItemId = itemId;
+                    }
+
                     LockCraftingMode lockReason = host.getLogic().getCraftingLockedReason();
                     boolean locked = lockReason != LockCraftingMode.NONE;
                     if (locked && entry.lockStartMs == 0) {
@@ -234,16 +250,29 @@ public class CraftTracker {
                         if (cpuBusy) {
                             entry.missedCount = 0;
                             entry.lockStartMs = 0;
+                            ResourceLocation itemId = getProviderOutputItem(be, host);
+                            if (itemId != null) {
+                                entry.outputItemId = itemId;
+                            }
                             if (entry.cooldownUntilMs == 0 || entry.cooldownUntilMs - now < COOLDOWN_MS / 2) {
                                 entry.cooldownUntilMs = now + COOLDOWN_MS;
                             }
                         } else if (now < entry.cooldownUntilMs) {
                             entry.missedCount = 0;
+                            // CPU may have started a new job even if isGridCpuBusy was false
+                            ResourceLocation itemId = getProviderOutputItem(be, host);
+                            if (itemId != null) {
+                                entry.outputItemId = itemId;
+                            }
                         } else {
                             entry.lockStartMs = 0;
                         }
                     } else if (now < entry.cooldownUntilMs) {
                         entry.missedCount = 0;
+                        ResourceLocation itemId = getProviderOutputItem(be, host);
+                        if (itemId != null) {
+                            entry.outputItemId = itemId;
+                        }
                     } else {
                         entry.lockStartMs = 0;
                     }
@@ -286,12 +315,19 @@ public class CraftTracker {
                         LOGGER.info("SCAN provider {}: busy={}, locked={}", immPos, busy, locked);
                         seen.add(immPos);
 
+                        ResourceLocation itemId = getProviderOutputItem(be, host);
+
                         if (existing == null) {
-                            entries.put(immPos, new TrackerEntry(locked ? now : 0));
+                            TrackerEntry entry = new TrackerEntry(locked ? now : 0);
+                            entry.outputItemId = itemId;
+                            entries.put(immPos, entry);
                         } else {
                             existing.missedCount = 0;
                             existing.cooldownUntilMs = 0;
                             existing.tentative = false;
+                            if (itemId != null) {
+                                existing.outputItemId = itemId;
+                            }
                             if (locked && existing.lockStartMs == 0) {
                                 existing.lockStartMs = now;
                             } else if (!locked) {
@@ -307,11 +343,17 @@ public class CraftTracker {
                                 existing.missedCount = 0;
                                 seen.add(immPos);
                             } else if (now < existing.cooldownUntilMs) {
+                                // Still in cooldown — refresh item in case CPU switched jobs
+                                ResourceLocation itemId = getProviderOutputItem(be, host);
+                                if (itemId != null) {
+                                    existing.outputItemId = itemId;
+                                }
                                 seen.add(immPos);
                             }
                         } else if (wasActive) {
                             LOGGER.info("SCAN provider {}: was active last scan, new entry with cooldown", immPos);
                             TrackerEntry entry = new TrackerEntry(0);
+                            entry.outputItemId = getProviderOutputItem(be, host);
                             entry.cooldownUntilMs = now + COOLDOWN_MS;
                             entries.put(immPos, entry);
                             seen.add(immPos);
@@ -349,6 +391,29 @@ public class CraftTracker {
         } catch (Exception ignored) {
         }
         return false;
+    }
+
+    private static @Nullable ResourceLocation getProviderOutputItem(BlockEntity be, PatternProviderLogicHost host) {
+        try {
+            IGridNode node = getGridNode(be);
+            if (node == null) return null;
+            IGrid grid = node.getGrid();
+            if (grid == null) return null;
+            ICraftingService cs = grid.getCraftingService();
+            if (cs == null) return null;
+
+            for (IPatternDetails pattern : host.getLogic().getAvailablePatterns()) {
+                GenericStack output = pattern.getPrimaryOutput();
+                if (output != null && cs.isRequesting(output.what())) {
+                    ResourceLocation regKey = output.what().getId();
+                    if (BuiltInRegistries.ITEM.containsKey(regKey)) {
+                        return regKey;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 
     private static boolean isGridCpuBusy(BlockEntity be) {
@@ -402,6 +467,7 @@ public class CraftTracker {
         int missedCount;
         long cooldownUntilMs;
         boolean tentative;
+        @Nullable ResourceLocation outputItemId;
 
         TrackerEntry(long lockStartMs) {
             this.lockStartMs = lockStartMs;
