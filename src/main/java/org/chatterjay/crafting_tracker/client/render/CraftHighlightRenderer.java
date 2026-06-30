@@ -20,7 +20,16 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.phys.Vec3;
+
+import net.minecraft.core.Registry;
+
+import net.neoforged.neoforge.client.extensions.common.IClientFluidTypeExtensions;
+import net.neoforged.neoforge.fluids.FluidStack;
+
+import mekanism.api.MekanismAPI;
+import mekanism.api.chemical.Chemical;
 
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -35,6 +44,8 @@ import org.joml.Matrix4f;
 
 @EventBusSubscriber(modid = Crafting_tracker.MODID, value = Dist.CLIENT)
 public class CraftHighlightRenderer {
+
+    private static final int TYPE_CHEMICAL = 3;
 
     @SuppressWarnings("deprecation")
     private static final RenderType OVERLAY_NO_DEPTH = RenderType.create(
@@ -71,6 +82,21 @@ public class CraftHighlightRenderer {
             RenderType.CompositeState.builder()
                     .setShaderState(new RenderStateShard.ShaderStateShard(
                             () -> net.minecraft.client.renderer.GameRenderer.getPositionTexShader()))
+                    .setTextureState(new RenderStateShard.TextureStateShard(
+                            TextureAtlas.LOCATION_BLOCKS, false, false))
+                    .setDepthTestState(new RenderStateShard.DepthTestStateShard("always", 519))
+                    .setTransparencyState(RenderStateShard.TRANSLUCENT_TRANSPARENCY)
+                    .createCompositeState(true));
+
+    @SuppressWarnings("deprecation")
+    private static final RenderType TINTED_SPRITE_NO_DEPTH = RenderType.create(
+            "ct_tinted_sprite_no_depth",
+            DefaultVertexFormat.POSITION_TEX_COLOR,
+            VertexFormat.Mode.QUADS,
+            256, false, false,
+            RenderType.CompositeState.builder()
+                    .setShaderState(new RenderStateShard.ShaderStateShard(
+                            () -> net.minecraft.client.renderer.GameRenderer.getPositionTexColorShader()))
                     .setTextureState(new RenderStateShard.TextureStateShard(
                             TextureAtlas.LOCATION_BLOCKS, false, false))
                     .setDepthTestState(new RenderStateShard.DepthTestStateShard("always", 519))
@@ -116,7 +142,7 @@ public class CraftHighlightRenderer {
         // Item sprite pass: billboard sprite in center of each provider
         VertexConsumer spriteConsumer = bufferSource.getBuffer(SPRITE_NO_DEPTH);
         for (HighlightEntry entry : highlights) {
-            if (entry.itemId() == null) continue;
+            if (entry.itemId() == null || entry.outputType() != 0) continue;
             ItemStack displayStack = new ItemStack(BuiltInRegistries.ITEM.get(entry.itemId()));
             if (displayStack.isEmpty()) continue;
             BakedModel model = mc.getItemRenderer().getModel(displayStack, mc.level, mc.player, 0);
@@ -124,6 +150,36 @@ public class CraftHighlightRenderer {
             renderItemSprite(spriteConsumer, poseStack, entry.pos(), camera, sprite);
         }
         bufferSource.endBatch(SPRITE_NO_DEPTH);
+
+        // Fluid sprite pass: billboard with tint in center of each provider
+        VertexConsumer fluidConsumer = bufferSource.getBuffer(TINTED_SPRITE_NO_DEPTH);
+        for (HighlightEntry entry : highlights) {
+            if (entry.itemId() == null || entry.outputType() != 1) continue;
+            Fluid fluid = BuiltInRegistries.FLUID.get(entry.itemId());
+            if (fluid == null) continue;
+            var ext = IClientFluidTypeExtensions.of(fluid);
+            ResourceLocation stillTex = ext.getStillTexture(new FluidStack(fluid, 1));
+            if (stillTex == null) continue;
+            TextureAtlasSprite sprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(stillTex);
+            int tint = ext.getTintColor(new FluidStack(fluid, 1));
+            renderTintedSprite(fluidConsumer, poseStack, entry.pos(), camera, sprite, tint);
+        }
+        bufferSource.endBatch(TINTED_SPRITE_NO_DEPTH);
+
+        // Chemical sprite pass: billboard with tint in center of each provider
+        VertexConsumer chemicalConsumer = bufferSource.getBuffer(TINTED_SPRITE_NO_DEPTH);
+        for (HighlightEntry entry : highlights) {
+            if (entry.itemId() == null || entry.outputType() != TYPE_CHEMICAL) continue;
+            Registry<Chemical> chemicalRegistry = mc.level.registryAccess().registry(MekanismAPI.CHEMICAL_REGISTRY_NAME).orElse(null);
+            if (chemicalRegistry == null) continue;
+            Chemical chemical = chemicalRegistry.get(entry.itemId());
+            if (chemical == null) continue;
+            ResourceLocation icon = chemical.getIcon();
+            if (icon == null) continue;
+            TextureAtlasSprite sprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(icon);
+            renderTintedSprite(chemicalConsumer, poseStack, entry.pos(), camera, sprite, chemical.getTint());
+        }
+        bufferSource.endBatch(TINTED_SPRITE_NO_DEPTH);
 
         // Pass 3: thick lines — wider for visibility
         RenderSystem.lineWidth(3f);
@@ -211,6 +267,31 @@ public class CraftHighlightRenderer {
         consumer.addVertex(matrix, +s, -s, 0).setUv(u1, v1);
         consumer.addVertex(matrix, +s, +s, 0).setUv(u1, v0);
         consumer.addVertex(matrix, -s, +s, 0).setUv(u0, v0);
+
+        poseStack.popPose();
+    }
+
+    private static void renderTintedSprite(VertexConsumer consumer, PoseStack poseStack,
+                                            BlockPos pos, Camera camera, TextureAtlasSprite sprite,
+                                            int argb) {
+        float s = 0.35f;
+        float u0 = sprite.getU0(), u1 = sprite.getU1();
+        float v0 = sprite.getV0(), v1 = sprite.getV1();
+        int a = (argb >> 24) & 0xFF;
+        int r = (argb >> 16) & 0xFF;
+        int g = (argb >> 8) & 0xFF;
+        int b = argb & 0xFF;
+        if (a == 0) a = 255; // ensure visibility
+
+        poseStack.pushPose();
+        poseStack.translate(pos.getX() + 0.5, pos.getY() + 0.35, pos.getZ() + 0.5);
+        poseStack.mulPose(camera.rotation());
+
+        Matrix4f matrix = poseStack.last().pose();
+        consumer.addVertex(matrix, -s, -s, 0).setUv(u0, v1).setColor(r, g, b, a);
+        consumer.addVertex(matrix, +s, -s, 0).setUv(u1, v1).setColor(r, g, b, a);
+        consumer.addVertex(matrix, +s, +s, 0).setUv(u1, v0).setColor(r, g, b, a);
+        consumer.addVertex(matrix, -s, +s, 0).setUv(u0, v0).setColor(r, g, b, a);
 
         poseStack.popPose();
     }

@@ -19,6 +19,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.chunk.LevelChunk;
 
@@ -31,15 +32,20 @@ import org.chatterjay.crafting_tracker.network.payloads.S2CCraftHighlightData.Hi
 import org.slf4j.Logger;
 
 import appeng.api.crafting.IPatternDetails;
+import appeng.api.stacks.AEFluidKey;
+import appeng.api.stacks.AEItemKey;
 import appeng.api.stacks.AEKey;
 import appeng.api.stacks.GenericStack;
 import appeng.api.config.LockCraftingMode;
 import appeng.api.networking.IGrid;
 import appeng.api.networking.IGridNode;
 import appeng.api.networking.IInWorldGridNodeHost;
+import appeng.api.networking.crafting.CraftingJobStatus;
 import appeng.api.networking.crafting.ICraftingCPU;
 import appeng.api.networking.crafting.ICraftingService;
 import appeng.helpers.patternprovider.PatternProviderLogicHost;
+
+import me.ramidzkh.mekae2.ae2.MekanismKey;
 
 public class CraftTracker {
     private static final Logger LOGGER = LogUtils.getLogger();
@@ -50,6 +56,13 @@ public class CraftTracker {
     private static final Map<BlockPos, TrackerEntry> entries = new HashMap<>();
     private static final Map<BlockPos, Boolean> prevProviderBusy = new HashMap<>();
     private static int scanCounter;
+
+    static final int TYPE_ITEM = 0;
+    static final int TYPE_FLUID = 1;
+    static final int TYPE_OTHER = 2;
+    static final int TYPE_CHEMICAL = 3;
+
+    private record OutputInfo(@Nullable ResourceLocation id, int type) {}
 
     public static boolean isEnabledFor(UUID playerId) {
         return CTConfig.highlightEnabled && !disabledPlayers.contains(playerId);
@@ -106,9 +119,9 @@ public class CraftTracker {
             // Clean up prevProviderBusy entries for providers no longer in range
             prevProviderBusy.keySet().removeIf(k -> !seenProviders.contains(k));
 
-            // Keep entries still in cooldown (output targets or entries waiting to expire)
+            // Keep entries still in cooldown or stuck
             for (Map.Entry<BlockPos, TrackerEntry> e : entries.entrySet()) {
-                if (now < e.getValue().cooldownUntilMs) {
+                if (now < e.getValue().cooldownUntilMs || e.getValue().stuck) {
                     seen.add(e.getKey());
                 }
             }
@@ -118,12 +131,16 @@ public class CraftTracker {
                 if (!seen.contains(e.getKey())) {
                     e.getValue().missedCount++;
                     if (e.getValue().missedCount > MAX_MISSED) {
+                        LOGGER.info("Cleaning up expired entry at {}", e.getKey());
                         return true;
                     }
                 }
                 return false;
             });
             int removed = beforeSize - entries.size();
+            if (removed > 0) {
+                LOGGER.info("Removed {} expired entries ({} remaining)", removed, entries.size());
+            }
         }
 
         // Phase 3: send highlights to each tracking player
@@ -138,11 +155,24 @@ public class CraftTracker {
                 if (!level.hasChunk(pos.getX() >> 4, pos.getZ() >> 4)) continue;
 
                 CraftStatus status = computeStatus(e.getValue(), now);
-                highlightEntries.add(new HighlightEntry(pos, status.ordinal(), e.getValue().outputItemId));
+                var out = e.getValue().outputInfo;
+                highlightEntries.add(new HighlightEntry(pos, status.ordinal(),
+                        out != null ? out.id() : null,
+                        out != null ? out.type() : 0));
             }
 
+            if (scanCounter % 20 == 0) {
+                LOGGER.info("Tracking {} entries, sending {} highlights to {}", entries.size(), highlightEntries.size(), player.getName().getString());
+            }
             PacketDistributor.sendToPlayer(player, new S2CCraftHighlightData(highlightEntries));
         }
+    }
+
+    private static boolean hasAdjacentInventory(Level level, BlockPos pos) {
+        for (Direction dir : Direction.values()) {
+            if (level.getBlockEntity(pos.relative(dir)) != null) return true;
+        }
+        return false;
     }
 
     private static void quickScan(MinecraftServer server, long now, List<ServerPlayer> trackingPlayers) {
@@ -178,17 +208,29 @@ public class CraftTracker {
 
                         if (busy || locked) {
                             TrackerEntry entry = new TrackerEntry(locked ? now : 0);
-                            entry.outputItemId = getProviderOutputItem(be, host);
+                            entry.stuck = locked;
+                            entry.outputInfo = getOutputInfo(be, host);
                             entries.put(immPos, entry);
                             prevProviderBusy.put(immPos, true);
                         } else {
-                            ResourceLocation itemId = getProviderOutputItem(be, host);
-                            if (itemId != null) {
-                                TrackerEntry entry = new TrackerEntry(0);
-                                entry.outputItemId = itemId;
-                                entry.tentative = true;
-                                entry.cooldownUntilMs = now + 1000;
-                                entries.put(immPos, entry);
+                            OutputInfo info = getOutputInfo(be, host);
+                            if (info != null) {
+                                boolean hasInv = hasAdjacentInventory(level, immPos);
+                                LOGGER.info("quickScan: tracking idle provider at {} output={} hasInventory={}", immPos, info.id(), hasInv);
+                                if (hasInv) {
+                                    TrackerEntry entry = new TrackerEntry(0);
+                                    entry.outputInfo = info;
+                                    entry.tentative = true;
+                                    entry.cooldownUntilMs = now + 1000;
+                                    entries.put(immPos, entry);
+                                } else {
+                                    TrackerEntry entry = new TrackerEntry(now);
+                                    entry.outputInfo = info;
+                                    entry.stuck = true;
+                                    entry.lockStartMs = now;
+                                    entries.put(immPos, entry);
+                                    prevProviderBusy.put(immPos, false);
+                                }
                             }
                         }
                     }
@@ -215,13 +257,15 @@ public class CraftTracker {
                     entry.tentative = false;
                     prevProviderBusy.put(pos, true);
 
-                    ResourceLocation itemId = getProviderOutputItem(be, host);
-                    if (itemId != null) {
-                        entry.outputItemId = itemId;
-                    }
-
                     LockCraftingMode lockReason = host.getLogic().getCraftingLockedReason();
                     boolean locked = lockReason != LockCraftingMode.NONE;
+
+                    OutputInfo info = getOutputInfo(be, host);
+                    if (info != null) {
+                        entry.outputInfo = info;
+                    }
+
+                    entry.stuck = locked;
 
                     // Track continuous busy time for output-full detection (busy but not locked)
                     if (!locked && entry.busyStartMs == 0) {
@@ -234,14 +278,16 @@ public class CraftTracker {
                     }
                 } else {
                     entry.busyStartMs = 0;
-                    if (!entry.tentative) {
+                    if (entry.stuck) {
+                        entry.missedCount = 0;
+                    } else if (!entry.tentative) {
                         boolean cpuBusy = isGridCpuBusy(be);
 
                         if (cpuBusy) {
                             entry.missedCount = 0;
-                            ResourceLocation itemId = getProviderOutputItem(be, host);
-                            if (itemId != null) {
-                                entry.outputItemId = itemId;
+                            OutputInfo info = getOutputInfo(be, host);
+                            if (info != null) {
+                                entry.outputInfo = info;
                             }
                             if (entry.cooldownUntilMs == 0 || entry.cooldownUntilMs - now < COOLDOWN_MS / 2) {
                                 entry.cooldownUntilMs = now + COOLDOWN_MS;
@@ -249,18 +295,18 @@ public class CraftTracker {
                         } else if (now < entry.cooldownUntilMs) {
                             entry.missedCount = 0;
                             // CPU may have started a new job even if isGridCpuBusy was false
-                            ResourceLocation itemId = getProviderOutputItem(be, host);
-                            if (itemId != null) {
-                                entry.outputItemId = itemId;
+                            OutputInfo info = getOutputInfo(be, host);
+                            if (info != null) {
+                                entry.outputInfo = info;
                             }
                         } else {
                             entry.lockStartMs = 0;
                         }
                     } else if (now < entry.cooldownUntilMs) {
                         entry.missedCount = 0;
-                        ResourceLocation itemId = getProviderOutputItem(be, host);
-                        if (itemId != null) {
-                            entry.outputItemId = itemId;
+                        OutputInfo info = getOutputInfo(be, host);
+                        if (info != null) {
+                            entry.outputInfo = info;
                         }
                     } else {
                         entry.lockStartMs = 0;
@@ -303,21 +349,23 @@ public class CraftTracker {
                     if (active) {
                         seen.add(immPos);
 
-                        ResourceLocation itemId = getProviderOutputItem(be, host);
+                        OutputInfo info = getOutputInfo(be, host);
 
                         if (existing == null) {
                             TrackerEntry entry = new TrackerEntry(locked ? now : 0);
                             if (!locked) {
                                 entry.busyStartMs = now;
                             }
-                            entry.outputItemId = itemId;
+                            entry.stuck = locked;
+                            entry.outputInfo = info;
                             entries.put(immPos, entry);
                         } else {
                             existing.missedCount = 0;
                             existing.cooldownUntilMs = 0;
                             existing.tentative = false;
-                            if (itemId != null) {
-                                existing.outputItemId = itemId;
+                            existing.stuck = locked;
+                            if (info != null) {
+                                existing.outputInfo = info;
                             }
                             if (!locked && existing.busyStartMs == 0) {
                                 existing.busyStartMs = now;
@@ -332,24 +380,45 @@ public class CraftTracker {
                         // Provider is idle now
                         if (existing != null) {
                             existing.busyStartMs = 0;
-                            if (wasActive) {
+                            if (existing.stuck) {
+                                existing.missedCount = 0;
+                                seen.add(immPos);
+                            } else if (wasActive) {
                                 existing.cooldownUntilMs = now + COOLDOWN_MS;
                                 existing.missedCount = 0;
                                 seen.add(immPos);
                             } else if (now < existing.cooldownUntilMs) {
                                 // Still in cooldown — refresh item in case CPU switched jobs
-                                ResourceLocation itemId = getProviderOutputItem(be, host);
-                                if (itemId != null) {
-                                    existing.outputItemId = itemId;
+                                OutputInfo info = getOutputInfo(be, host);
+                                if (info != null) {
+                                    existing.outputInfo = info;
                                 }
                                 seen.add(immPos);
                             }
                         } else if (wasActive) {
                             TrackerEntry entry = new TrackerEntry(0);
-                            entry.outputItemId = getProviderOutputItem(be, host);
+                            entry.outputInfo = getOutputInfo(be, host);
                             entry.cooldownUntilMs = now + COOLDOWN_MS;
                             entries.put(immPos, entry);
                             seen.add(immPos);
+                        } else {
+                            // Idle provider, no existing entry — check if pattern matches a busy CPU or is requested
+                            OutputInfo info = getOutputInfo(be, host);
+                            if (info != null) {
+                                TrackerEntry entry;
+                                if (hasAdjacentInventory(level, immPos)) {
+                                    entry = new TrackerEntry(0);
+                                    entry.outputInfo = info;
+                                    entry.cooldownUntilMs = now + COOLDOWN_MS;
+                                } else {
+                                    entry = new TrackerEntry(now);
+                                    entry.outputInfo = info;
+                                    entry.stuck = true;
+                                    entry.lockStartMs = now;
+                                }
+                                entries.put(immPos, entry);
+                                seen.add(immPos);
+                            }
                         }
                     }
                 }
@@ -381,30 +450,57 @@ public class CraftTracker {
                     return true;
                 }
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            LOGGER.info("isProviderNeededByCraftingSystem: exception at {}: {}", be.getBlockPos(), e.getMessage());
         }
         return false;
     }
 
-    private static @Nullable ResourceLocation getProviderOutputItem(BlockEntity be, PatternProviderLogicHost host) {
+    private static @Nullable OutputInfo getOutputInfo(BlockEntity be, PatternProviderLogicHost host) {
         try {
             IGridNode node = getGridNode(be);
-            if (node == null) return null;
+            if (node == null) {
+                LOGGER.info("getOutputInfo: grid node is null at {}", be.getBlockPos());
+                return null;
+            }
             IGrid grid = node.getGrid();
-            if (grid == null) return null;
+            if (grid == null) {
+                LOGGER.info("getOutputInfo: grid is null at {}", be.getBlockPos());
+                return null;
+            }
             ICraftingService cs = grid.getCraftingService();
-            if (cs == null) return null;
+            if (cs == null) {
+                LOGGER.info("getOutputInfo: crafting service is null at {}", be.getBlockPos());
+                return null;
+            }
 
             for (IPatternDetails pattern : host.getLogic().getAvailablePatterns()) {
                 GenericStack output = pattern.getPrimaryOutput();
-                if (output != null && cs.isRequesting(output.what())) {
-                    ResourceLocation regKey = output.what().getId();
-                    if (BuiltInRegistries.ITEM.containsKey(regKey)) {
-                        return regKey;
+                if (output == null) continue;
+                AEKey key = output.what();
+                boolean requesting = cs.isRequesting(key) || isCpuCraftingOutput(cs, key);
+
+                if (requesting) {
+                    ResourceLocation regKey = key.getId();
+
+                    if (key instanceof AEItemKey) {
+                        if (BuiltInRegistries.ITEM.containsKey(regKey)) {
+                            return new OutputInfo(regKey, TYPE_ITEM);
+                        }
+                    } else if (key instanceof AEFluidKey) {
+                        if (BuiltInRegistries.FLUID.containsKey(regKey)) {
+                            return new OutputInfo(regKey, TYPE_FLUID);
+                        }
+                    } else if (key instanceof MekanismKey) {
+                        return new OutputInfo(regKey, TYPE_CHEMICAL);
+                    } else {
+                        // Other types (chemicals, etc.) — trust the key's ID
+                        return new OutputInfo(regKey, TYPE_OTHER);
                     }
                 }
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            LOGGER.info("getOutputInfo: exception at {}: {}", be.getBlockPos(), e.getMessage());
         }
         return null;
     }
@@ -421,7 +517,8 @@ public class CraftTracker {
             for (ICraftingCPU cpu : cs.getCpus()) {
                 if (cpu.isBusy()) return true;
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            LOGGER.info("isGridCpuBusy: exception: {}", e.getMessage());
         }
         return false;
     }
@@ -437,7 +534,29 @@ public class CraftTracker {
         return null;
     }
 
+    private static boolean isCpuCraftingOutput(ICraftingService cs, AEKey key) {
+        try {
+            for (ICraftingCPU cpu : cs.getCpus()) {
+                if (!cpu.isBusy()) continue;
+                CraftingJobStatus status = cpu.getJobStatus();
+                if (status == null || status.crafting() == null) continue;
+                AEKey cpuKey = status.crafting().what();
+                if (cpuKey.equals(key) || cpuKey.getId().equals(key.getId())) {
+                    if (scanCounter % 20 == 0) {
+                        LOGGER.info("CPU crafting {} matches provider pattern", key.getId());
+                    }
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.info("isCpuCraftingOutput: exception: {}", e.getMessage());
+        }
+        return false;
+    }
+
     private static CraftStatus computeStatus(TrackerEntry entry, long now) {
+        if (entry.stuck) return CraftStatus.STUCK;
+
         long startMs;
         if (entry.lockStartMs != 0) {
             startMs = entry.lockStartMs;
@@ -462,7 +581,8 @@ public class CraftTracker {
         int missedCount;
         long cooldownUntilMs;
         boolean tentative;
-        @Nullable ResourceLocation outputItemId;
+        boolean stuck;
+        @Nullable OutputInfo outputInfo;
 
         TrackerEntry(long lockStartMs) {
             this.lockStartMs = lockStartMs;

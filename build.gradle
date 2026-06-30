@@ -89,6 +89,8 @@ dependencies {
     implementation files('libs/extendedae_plus-1.21.1-1.5.4.jar')
     compileOnly files('../BeyondDimensions/beyonddimensions-1.21.1-neoforge-0.7.14.jar')
     compileOnly files('run/mods/ars_nouveau-1.21.1-5.11.7.jar')
+    compileOnly files('run/mods/Mekanism-1.21.1-10.7.19.85.jar')
+    compileOnly files('run/mods/Applied-Mekanistics-1.6.3.jar')
 }
 
 var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
