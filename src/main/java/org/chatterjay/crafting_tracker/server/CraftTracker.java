@@ -503,42 +503,52 @@ public class CraftTracker {
         try {
             IGrid grid = getGrid(be);
             if (grid == null) {
-                LOGGER.info("getOutputInfo: grid is null at {}", be.getBlockPos());
                 return null;
             }
             ICraftingService cs = grid.getCraftingService();
             if (cs == null) {
-                LOGGER.info("getOutputInfo: crafting service is null at {}", be.getBlockPos());
                 return null;
             }
 
-            for (IPatternDetails pattern : getPatterns(be)) {
+            var patterns = getPatterns(be);
+
+            // Pass 1: prioritize what the CPU is actively crafting (fastest to switch)
+            for (IPatternDetails pattern : patterns) {
                 GenericStack output = pattern.getPrimaryOutput();
                 if (output == null) continue;
                 AEKey key = output.what();
-                boolean requesting = cs.isRequesting(key) || isCpuCraftingOutput(cs, key);
+                if (isCpuCraftingOutput(cs, key)) {
+                    return buildOutputInfo(key);
+                }
+            }
 
-                if (requesting) {
-                    ResourceLocation regKey = key.getId();
-
-                    if (key instanceof AEItemKey) {
-                        if (BuiltInRegistries.ITEM.containsKey(regKey)) {
-                            return new OutputInfo(regKey, TYPE_ITEM);
-                        }
-                    } else if (key instanceof AEFluidKey) {
-                        if (BuiltInRegistries.FLUID.containsKey(regKey)) {
-                            return new OutputInfo(regKey, TYPE_FLUID);
-                        }
-                    } else if (key instanceof MekanismKey) {
-                        return new OutputInfo(regKey, TYPE_CHEMICAL);
-                    } else {
-                        // Other types (chemicals, etc.) — trust the key's ID
-                        return new OutputInfo(regKey, TYPE_OTHER);
-                    }
+            // Pass 2: fall back to cs.isRequesting (slower to update on item switch)
+            for (IPatternDetails pattern : patterns) {
+                GenericStack output = pattern.getPrimaryOutput();
+                if (output == null) continue;
+                AEKey key = output.what();
+                if (cs.isRequesting(key)) {
+                    return buildOutputInfo(key);
                 }
             }
         } catch (Exception e) {
             LOGGER.info("getOutputInfo: exception at {}: {}", be.getBlockPos(), e.getMessage());
+        }
+        return null;
+    }
+
+    private static @Nullable OutputInfo buildOutputInfo(AEKey key) {
+        ResourceLocation regKey = key.getId();
+        if (key instanceof AEItemKey) {
+            if (BuiltInRegistries.ITEM.containsKey(regKey)) {
+                return new OutputInfo(regKey, TYPE_ITEM);
+            }
+        } else if (key instanceof AEFluidKey) {
+            if (BuiltInRegistries.FLUID.containsKey(regKey)) {
+                return new OutputInfo(regKey, TYPE_FLUID);
+            }
+        } else if (key instanceof MekanismKey) {
+            return new OutputInfo(regKey, TYPE_CHEMICAL);
         }
         return null;
     }
