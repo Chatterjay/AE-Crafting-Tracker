@@ -19,7 +19,6 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.Items;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.phys.Vec3;
 
@@ -146,7 +145,7 @@ public class CraftHighlightRenderer {
             ItemStack displayStack = new ItemStack(BuiltInRegistries.ITEM.get(entry.itemId()));
             if (displayStack.isEmpty()) continue;
             BakedModel model = mc.getItemRenderer().getModel(displayStack, mc.level, mc.player, 0);
-            TextureAtlasSprite sprite = model.getParticleIcon();
+            TextureAtlasSprite sprite = getDisplaySprite(entry.itemId(), model);
             renderItemSprite(spriteConsumer, poseStack, entry.pos(), camera, sprite);
         }
         bufferSource.endBatch(SPRITE_NO_DEPTH);
@@ -250,6 +249,43 @@ public class CraftHighlightRenderer {
                               float r, float g, float b, float a) {
         consumer.addVertex(pose, x1, y1, z1).setColor(r, g, b, a).setNormal(poseEntry, 0f, 1f, 0f);
         consumer.addVertex(pose, x2, y2, z2).setColor(r, g, b, a).setNormal(poseEntry, 0f, 1f, 0f);
+    }
+
+    /**
+     * Get the best sprite to display for a given item.
+     * For AE2-style part items (export bus, import bus, etc.), the item model
+     * is a composite of cable + part, and getParticleIcon() returns the cable
+     * texture. This method tries looking up {namespace}:part/{path} on the
+     * block atlas first, falling back to getParticleIcon().
+     * ExtendedAE/AdvancedAE register parts with a _part suffix that the
+     * texture path doesn't have, so we also try the stripped path.
+     * Some ExtendedAE textures use _base suffix (e.g. storage buses).
+     */
+    private static TextureAtlasSprite getDisplaySprite(ResourceLocation itemId, BakedModel model) {
+        // Only applies to AE2-compatible mods with composite part models
+        String ns = itemId.getNamespace();
+        if (!ns.equals("ae2") && !ns.equals("extendedae") && !ns.equals("advanced_ae") && !ns.equals("appmek")) {
+            return model.getParticleIcon();
+        }
+        Minecraft mc = Minecraft.getInstance();
+        String path = itemId.getPath();
+        // Strip _part suffix used by ExtendedAE/AdvancedAE
+        if (path.endsWith("_part")) {
+            path = path.substring(0, path.length() - 5);
+        }
+        // Try exact match first
+        ResourceLocation partLocation = ResourceLocation.fromNamespaceAndPath(ns, "part/" + path);
+        TextureAtlasSprite partSprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(partLocation);
+        if (partLocation.equals(partSprite.contents().name())) {
+            return partSprite;
+        }
+        // Some ExtendedAE textures use _base suffix (e.g., mod_storage_bus_base.png)
+        ResourceLocation baseLocation = ResourceLocation.fromNamespaceAndPath(ns, "part/" + path + "_base");
+        TextureAtlasSprite baseSprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(baseLocation);
+        if (baseLocation.equals(baseSprite.contents().name())) {
+            return baseSprite;
+        }
+        return model.getParticleIcon();
     }
 
     private static void renderItemSprite(VertexConsumer consumer, PoseStack poseStack,

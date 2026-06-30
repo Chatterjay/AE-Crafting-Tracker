@@ -45,7 +45,11 @@ import appeng.api.networking.crafting.ICraftingCPU;
 import appeng.api.networking.crafting.ICraftingService;
 import appeng.helpers.patternprovider.PatternProviderLogicHost;
 
+import com.glodblock.github.extendedae.common.tileentities.matrix.TileAssemblerMatrixPattern;
+
 import me.ramidzkh.mekae2.ae2.MekanismKey;
+
+import net.pedroksl.advanced_ae.common.logic.AdvPatternProviderLogicHost;
 
 public class CraftTracker {
     private static final Logger LOGGER = LogUtils.getLogger();
@@ -63,6 +67,49 @@ public class CraftTracker {
     static final int TYPE_CHEMICAL = 3;
 
     private record OutputInfo(@Nullable ResourceLocation id, int type) {}
+
+    // --- Type abstractions for PatternProviderLogicHost / TileAssemblerMatrixPattern ---
+
+    private static boolean isPatternSource(BlockEntity be) {
+        return be instanceof PatternProviderLogicHost || be instanceof TileAssemblerMatrixPattern
+                || be instanceof AdvPatternProviderLogicHost;
+    }
+
+    private static boolean isPatternBusy(BlockEntity be) {
+        if (be instanceof PatternProviderLogicHost host) return host.getLogic().isBusy();
+        if (be instanceof TileAssemblerMatrixPattern matrix) return matrix.isBusy();
+        if (be instanceof AdvPatternProviderLogicHost host) return host.getLogic().isBusy();
+        return false;
+    }
+
+    private static boolean isPatternLocked(BlockEntity be) {
+        if (be instanceof PatternProviderLogicHost host)
+            return host.getLogic().getCraftingLockedReason() != LockCraftingMode.NONE;
+        if (be instanceof AdvPatternProviderLogicHost host)
+            return host.getLogic().getCraftingLockedReason() != LockCraftingMode.NONE;
+        return false;
+    }
+
+    private static List<IPatternDetails> getPatterns(BlockEntity be) {
+        if (be instanceof PatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
+        if (be instanceof TileAssemblerMatrixPattern matrix) return matrix.getAvailablePatterns();
+        if (be instanceof AdvPatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
+        return List.of();
+    }
+
+    @Nullable
+    private static IGrid getGrid(BlockEntity be) {
+        if (be instanceof TileAssemblerMatrixPattern matrix) {
+            try { return matrix.getGrid(); } catch (Exception ignored) {}
+        }
+        if (be instanceof AdvPatternProviderLogicHost host) {
+            try { return host.getGrid(); } catch (Exception ignored) {}
+        }
+        IGridNode node = getGridNode(be);
+        return node != null ? node.getGrid() : null;
+    }
+
+    // --- end type abstractions ---
 
     public static boolean isEnabledFor(UUID playerId) {
         return CTConfig.highlightEnabled && !disabledPlayers.contains(playerId);
@@ -195,7 +242,7 @@ public class CraftTracker {
                     for (Map.Entry<BlockPos, BlockEntity> beEntry : chunk.getBlockEntities().entrySet()) {
                         BlockPos pos = beEntry.getKey();
                         BlockEntity be = beEntry.getValue();
-                        if (!(be instanceof PatternProviderLogicHost host)) continue;
+                        if (!isPatternSource(be)) continue;
                         if (!pos.closerThan(ppos, quickRadius)) continue;
 
                         BlockPos immPos = pos.immutable();
@@ -203,17 +250,17 @@ public class CraftTracker {
                         // Skip already tracked entries — refreshEntries handles them per-tick
                         if (entries.containsKey(immPos)) continue;
 
-                        boolean busy = host.getLogic().isBusy();
-                        boolean locked = host.getLogic().getCraftingLockedReason() != LockCraftingMode.NONE;
+                        boolean busy = isPatternBusy(be);
+                        boolean locked = isPatternLocked(be);
 
                         if (busy || locked) {
                             TrackerEntry entry = new TrackerEntry(locked ? now : 0);
                             entry.stuck = locked;
-                            entry.outputInfo = getOutputInfo(be, host);
+                            entry.outputInfo = getOutputInfo(be);
                             entries.put(immPos, entry);
                             prevProviderBusy.put(immPos, true);
                         } else {
-                            OutputInfo info = getOutputInfo(be, host);
+                            OutputInfo info = getOutputInfo(be);
                             if (info != null) {
                                 boolean hasInv = hasAdjacentInventory(level, immPos);
                                 LOGGER.info("quickScan: tracking idle provider at {} output={} hasInventory={}", immPos, info.id(), hasInv);
@@ -247,9 +294,9 @@ public class CraftTracker {
             for (ServerLevel level : server.getAllLevels()) {
                 if (!level.hasChunk(pos.getX() >> 4, pos.getZ() >> 4)) continue;
                 BlockEntity be = level.getBlockEntity(pos);
-                if (!(be instanceof PatternProviderLogicHost host)) continue;
+                if (!isPatternSource(be)) continue;
 
-                boolean busy = host.getLogic().isBusy();
+                boolean busy = isPatternBusy(be);
 
                 if (busy) {
                     entry.cooldownUntilMs = 0;
@@ -257,10 +304,9 @@ public class CraftTracker {
                     entry.tentative = false;
                     prevProviderBusy.put(pos, true);
 
-                    LockCraftingMode lockReason = host.getLogic().getCraftingLockedReason();
-                    boolean locked = lockReason != LockCraftingMode.NONE;
+                    boolean locked = isPatternLocked(be);
 
-                    OutputInfo info = getOutputInfo(be, host);
+                    OutputInfo info = getOutputInfo(be);
                     if (info != null) {
                         entry.outputInfo = info;
                     }
@@ -285,7 +331,7 @@ public class CraftTracker {
 
                         if (cpuBusy) {
                             entry.missedCount = 0;
-                            OutputInfo info = getOutputInfo(be, host);
+                            OutputInfo info = getOutputInfo(be);
                             if (info != null) {
                                 entry.outputInfo = info;
                             }
@@ -295,7 +341,7 @@ public class CraftTracker {
                         } else if (now < entry.cooldownUntilMs) {
                             entry.missedCount = 0;
                             // CPU may have started a new job even if isGridCpuBusy was false
-                            OutputInfo info = getOutputInfo(be, host);
+                            OutputInfo info = getOutputInfo(be);
                             if (info != null) {
                                 entry.outputInfo = info;
                             }
@@ -304,7 +350,7 @@ public class CraftTracker {
                         }
                     } else if (now < entry.cooldownUntilMs) {
                         entry.missedCount = 0;
-                        OutputInfo info = getOutputInfo(be, host);
+                        OutputInfo info = getOutputInfo(be);
                         if (info != null) {
                             entry.outputInfo = info;
                         }
@@ -332,13 +378,12 @@ public class CraftTracker {
                     BlockPos pos = beEntry.getKey();
                     BlockEntity be = beEntry.getValue();
                     if (!pos.closerThan(ppos, radius)) continue;
-                    if (!(be instanceof PatternProviderLogicHost host)) continue;
+                    if (!isPatternSource(be)) continue;
 
                     BlockPos immPos = pos.immutable();
                     seenProviders.add(immPos);
-                    boolean busy = host.getLogic().isBusy();
-                    LockCraftingMode lockReason = host.getLogic().getCraftingLockedReason();
-                    boolean locked = lockReason != LockCraftingMode.NONE;
+                    boolean busy = isPatternBusy(be);
+                    boolean locked = isPatternLocked(be);
                     boolean active = busy || locked;
 
                     boolean wasActive = prevProviderBusy.getOrDefault(immPos, false);
@@ -349,7 +394,7 @@ public class CraftTracker {
                     if (active) {
                         seen.add(immPos);
 
-                        OutputInfo info = getOutputInfo(be, host);
+                        OutputInfo info = getOutputInfo(be);
 
                         if (existing == null) {
                             TrackerEntry entry = new TrackerEntry(locked ? now : 0);
@@ -389,7 +434,7 @@ public class CraftTracker {
                                 seen.add(immPos);
                             } else if (now < existing.cooldownUntilMs) {
                                 // Still in cooldown — refresh item in case CPU switched jobs
-                                OutputInfo info = getOutputInfo(be, host);
+                                OutputInfo info = getOutputInfo(be);
                                 if (info != null) {
                                     existing.outputInfo = info;
                                 }
@@ -397,13 +442,13 @@ public class CraftTracker {
                             }
                         } else if (wasActive) {
                             TrackerEntry entry = new TrackerEntry(0);
-                            entry.outputInfo = getOutputInfo(be, host);
+                            entry.outputInfo = getOutputInfo(be);
                             entry.cooldownUntilMs = now + COOLDOWN_MS;
                             entries.put(immPos, entry);
                             seen.add(immPos);
                         } else {
                             // Idle provider, no existing entry — check if pattern matches a busy CPU or is requested
-                            OutputInfo info = getOutputInfo(be, host);
+                            OutputInfo info = getOutputInfo(be);
                             if (info != null) {
                                 TrackerEntry entry;
                                 if (hasAdjacentInventory(level, immPos)) {
@@ -426,11 +471,9 @@ public class CraftTracker {
         }
     }
 
-    private static boolean isProviderNeededByCraftingSystem(BlockEntity be, PatternProviderLogicHost host) {
+    private static boolean isProviderNeededByCraftingSystem(BlockEntity be) {
         try {
-            IGridNode node = getGridNode(be);
-            if (node == null) return false;
-            IGrid grid = node.getGrid();
+            IGrid grid = getGrid(be);
             if (grid == null) return false;
             ICraftingService cs = grid.getCraftingService();
             if (cs == null) return false;
@@ -444,7 +487,7 @@ public class CraftTracker {
             }
             if (!cpuBusy) return false;
 
-            for (IPatternDetails pattern : host.getLogic().getAvailablePatterns()) {
+            for (IPatternDetails pattern : getPatterns(be)) {
                 GenericStack output = pattern.getPrimaryOutput();
                 if (output != null && cs.isRequesting(output.what())) {
                     return true;
@@ -456,14 +499,9 @@ public class CraftTracker {
         return false;
     }
 
-    private static @Nullable OutputInfo getOutputInfo(BlockEntity be, PatternProviderLogicHost host) {
+    private static @Nullable OutputInfo getOutputInfo(BlockEntity be) {
         try {
-            IGridNode node = getGridNode(be);
-            if (node == null) {
-                LOGGER.info("getOutputInfo: grid node is null at {}", be.getBlockPos());
-                return null;
-            }
-            IGrid grid = node.getGrid();
+            IGrid grid = getGrid(be);
             if (grid == null) {
                 LOGGER.info("getOutputInfo: grid is null at {}", be.getBlockPos());
                 return null;
@@ -474,7 +512,7 @@ public class CraftTracker {
                 return null;
             }
 
-            for (IPatternDetails pattern : host.getLogic().getAvailablePatterns()) {
+            for (IPatternDetails pattern : getPatterns(be)) {
                 GenericStack output = pattern.getPrimaryOutput();
                 if (output == null) continue;
                 AEKey key = output.what();
@@ -508,9 +546,7 @@ public class CraftTracker {
     private static boolean isGridCpuBusy(BlockEntity be) {
         if (be == null || be.getLevel() == null) return false;
         try {
-            IGridNode node = getGridNode(be);
-            if (node == null) return false;
-            IGrid grid = node.getGrid();
+            IGrid grid = getGrid(be);
             if (grid == null) return false;
             ICraftingService cs = grid.getCraftingService();
             if (cs == null) return false;

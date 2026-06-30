@@ -91,6 +91,8 @@ dependencies {
     compileOnly files('run/mods/ars_nouveau-1.21.1-5.11.7.jar')
     compileOnly files('run/mods/Mekanism-1.21.1-10.7.19.85.jar')
     compileOnly files('run/mods/Applied-Mekanistics-1.6.3.jar')
+    compileOnly files('run/mods/ExtendedAE-1.21-2.2.32-neoforge.jar')
+    compileOnly files('run/mods/AdvancedAE-1.6.11-1.21.1.jar')
 }
 
 var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
