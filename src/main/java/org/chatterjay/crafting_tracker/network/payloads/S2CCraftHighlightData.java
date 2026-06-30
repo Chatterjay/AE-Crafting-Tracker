@@ -12,7 +12,6 @@ import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.ResourceLocation;
 
 import org.chatterjay.crafting_tracker.Crafting_tracker;
-import org.chatterjay.crafting_tracker.api.CraftStatus;
 
 public record S2CCraftHighlightData(List<HighlightEntry> entries) implements CustomPacketPayload {
 
@@ -22,7 +21,9 @@ public record S2CCraftHighlightData(List<HighlightEntry> entries) implements Cus
     public static final StreamCodec<FriendlyByteBuf, S2CCraftHighlightData> STREAM_CODEC =
             StreamCodec.ofMember(S2CCraftHighlightData::write, S2CCraftHighlightData::new);
 
-    public record HighlightEntry(BlockPos pos, int statusOrdinal, @Nullable ResourceLocation itemId, int outputType) {}
+    public record HighlightEntry(BlockPos pos, int statusOrdinal, List<OutputItem> outputs) {
+        public record OutputItem(ResourceLocation itemId, int outputType) {}
+    }
 
     public S2CCraftHighlightData(FriendlyByteBuf buf) {
         this(readEntries(buf));
@@ -33,10 +34,13 @@ public record S2CCraftHighlightData(List<HighlightEntry> entries) implements Cus
         for (HighlightEntry entry : entries) {
             buf.writeBlockPos(entry.pos());
             buf.writeVarInt(entry.statusOrdinal());
-            buf.writeVarInt(entry.outputType());
-            buf.writeBoolean(entry.itemId() != null);
-            if (entry.itemId() != null) {
-                buf.writeResourceLocation(entry.itemId());
+            List<HighlightEntry.OutputItem> outputs = entry.outputs();
+            buf.writeVarInt(outputs != null ? outputs.size() : 0);
+            if (outputs != null) {
+                for (HighlightEntry.OutputItem out : outputs) {
+                    buf.writeResourceLocation(out.itemId());
+                    buf.writeVarInt(out.outputType());
+                }
             }
         }
     }
@@ -47,9 +51,19 @@ public record S2CCraftHighlightData(List<HighlightEntry> entries) implements Cus
         for (int i = 0; i < size; i++) {
             BlockPos pos = buf.readBlockPos();
             int ordinal = buf.readVarInt();
-            int outputType = buf.readVarInt();
-            ResourceLocation itemId = buf.readBoolean() ? buf.readResourceLocation() : null;
-            list.add(new HighlightEntry(pos, ordinal, itemId, outputType));
+            int outputCount = buf.readVarInt();
+            List<HighlightEntry.OutputItem> outputs;
+            if (outputCount > 0) {
+                outputs = new ArrayList<>(outputCount);
+                for (int j = 0; j < outputCount; j++) {
+                    ResourceLocation itemId = buf.readResourceLocation();
+                    int outputType = buf.readVarInt();
+                    outputs.add(new HighlightEntry.OutputItem(itemId, outputType));
+                }
+            } else {
+                outputs = List.of();
+            }
+            list.add(new HighlightEntry(pos, ordinal, outputs));
         }
         return list;
     }

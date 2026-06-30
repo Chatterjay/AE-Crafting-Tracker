@@ -54,7 +54,7 @@ import net.pedroksl.advanced_ae.common.logic.AdvPatternProviderLogicHost;
 public class CraftTracker {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final int MAX_MISSED = 10;
-    private static final long COOLDOWN_MS = 4000;
+    private static final long COOLDOWN_MS = 1000;
 
     private static final Set<UUID> disabledPlayers = new HashSet<>();
     private static final Map<BlockPos, TrackerEntry> entries = new HashMap<>();
@@ -65,8 +65,9 @@ public class CraftTracker {
     static final int TYPE_FLUID = 1;
     static final int TYPE_OTHER = 2;
     static final int TYPE_CHEMICAL = 3;
+    private static final int MAX_OUTPUTS = 3;
 
-    private record OutputInfo(@Nullable ResourceLocation id, int type) {}
+    private record OutputItem(ResourceLocation id, int type) {}
 
     // --- Type abstractions for PatternProviderLogicHost / TileAssemblerMatrixPattern ---
 
@@ -202,10 +203,16 @@ public class CraftTracker {
                 if (!level.hasChunk(pos.getX() >> 4, pos.getZ() >> 4)) continue;
 
                 CraftStatus status = computeStatus(e.getValue(), now);
-                var out = e.getValue().outputInfo;
-                highlightEntries.add(new HighlightEntry(pos, status.ordinal(),
-                        out != null ? out.id() : null,
-                        out != null ? out.type() : 0));
+                var outputs = e.getValue().outputs;
+                // Skip entries with no known output unless stuck
+                if ((outputs == null || outputs.isEmpty()) && !e.getValue().stuck) continue;
+                List<HighlightEntry.OutputItem> packetOutputs = new ArrayList<>();
+                if (outputs != null) {
+                    for (OutputItem out : outputs) {
+                        packetOutputs.add(new HighlightEntry.OutputItem(out.id(), out.type()));
+                    }
+                }
+                highlightEntries.add(new HighlightEntry(pos, status.ordinal(), packetOutputs));
             }
 
             if (scanCounter % 20 == 0) {
@@ -256,23 +263,23 @@ public class CraftTracker {
                         if (busy || locked) {
                             TrackerEntry entry = new TrackerEntry(locked ? now : 0);
                             entry.stuck = locked;
-                            entry.outputInfo = getOutputInfo(be);
+                            entry.outputs = getOutputInfo(be, null);
                             entries.put(immPos, entry);
                             prevProviderBusy.put(immPos, true);
                         } else {
-                            OutputInfo info = getOutputInfo(be);
+                            var info = getOutputInfo(be, null);
                             if (info != null) {
                                 boolean hasInv = hasAdjacentInventory(level, immPos);
-                                LOGGER.info("quickScan: tracking idle provider at {} output={} hasInventory={}", immPos, info.id(), hasInv);
+                                LOGGER.info("quickScan: tracking idle provider at {} output={} hasInventory={}", immPos, info.getFirst().id(), hasInv);
                                 if (hasInv) {
                                     TrackerEntry entry = new TrackerEntry(0);
-                                    entry.outputInfo = info;
+                                    entry.outputs = info;
                                     entry.tentative = true;
                                     entry.cooldownUntilMs = now + 1000;
                                     entries.put(immPos, entry);
                                 } else {
                                     TrackerEntry entry = new TrackerEntry(now);
-                                    entry.outputInfo = info;
+                                    entry.outputs = info;
                                     entry.stuck = true;
                                     entry.lockStartMs = now;
                                     entries.put(immPos, entry);
@@ -306,9 +313,9 @@ public class CraftTracker {
 
                     boolean locked = isPatternLocked(be);
 
-                    OutputInfo info = getOutputInfo(be);
+                    var info = getOutputInfo(be, entry.outputs);
                     if (info != null) {
-                        entry.outputInfo = info;
+                        entry.outputs = info;
                     }
 
                     entry.stuck = locked;
@@ -331,9 +338,9 @@ public class CraftTracker {
 
                         if (cpuBusy) {
                             entry.missedCount = 0;
-                            OutputInfo info = getOutputInfo(be);
+                            var info = getOutputInfo(be, entry.outputs);
                             if (info != null) {
-                                entry.outputInfo = info;
+                                entry.outputs = info;
                             }
                             if (entry.cooldownUntilMs == 0 || entry.cooldownUntilMs - now < COOLDOWN_MS / 2) {
                                 entry.cooldownUntilMs = now + COOLDOWN_MS;
@@ -341,18 +348,18 @@ public class CraftTracker {
                         } else if (now < entry.cooldownUntilMs) {
                             entry.missedCount = 0;
                             // CPU may have started a new job even if isGridCpuBusy was false
-                            OutputInfo info = getOutputInfo(be);
+                            var info = getOutputInfo(be, entry.outputs);
                             if (info != null) {
-                                entry.outputInfo = info;
+                                entry.outputs = info;
                             }
                         } else {
                             entry.lockStartMs = 0;
                         }
                     } else if (now < entry.cooldownUntilMs) {
                         entry.missedCount = 0;
-                        OutputInfo info = getOutputInfo(be);
+                        var info = getOutputInfo(be, entry.outputs);
                         if (info != null) {
-                            entry.outputInfo = info;
+                            entry.outputs = info;
                         }
                     } else {
                         entry.lockStartMs = 0;
@@ -394,7 +401,7 @@ public class CraftTracker {
                     if (active) {
                         seen.add(immPos);
 
-                        OutputInfo info = getOutputInfo(be);
+                        var info = getOutputInfo(be, existing != null ? existing.outputs : null);
 
                         if (existing == null) {
                             TrackerEntry entry = new TrackerEntry(locked ? now : 0);
@@ -402,7 +409,7 @@ public class CraftTracker {
                                 entry.busyStartMs = now;
                             }
                             entry.stuck = locked;
-                            entry.outputInfo = info;
+                            entry.outputs = info;
                             entries.put(immPos, entry);
                         } else {
                             existing.missedCount = 0;
@@ -410,7 +417,7 @@ public class CraftTracker {
                             existing.tentative = false;
                             existing.stuck = locked;
                             if (info != null) {
-                                existing.outputInfo = info;
+                                existing.outputs = info;
                             }
                             if (!locked && existing.busyStartMs == 0) {
                                 existing.busyStartMs = now;
@@ -434,30 +441,30 @@ public class CraftTracker {
                                 seen.add(immPos);
                             } else if (now < existing.cooldownUntilMs) {
                                 // Still in cooldown — refresh item in case CPU switched jobs
-                                OutputInfo info = getOutputInfo(be);
+                                var info = getOutputInfo(be, existing.outputs);
                                 if (info != null) {
-                                    existing.outputInfo = info;
+                                    existing.outputs = info;
                                 }
                                 seen.add(immPos);
                             }
                         } else if (wasActive) {
                             TrackerEntry entry = new TrackerEntry(0);
-                            entry.outputInfo = getOutputInfo(be);
+                            entry.outputs = getOutputInfo(be, null);
                             entry.cooldownUntilMs = now + COOLDOWN_MS;
                             entries.put(immPos, entry);
                             seen.add(immPos);
                         } else {
                             // Idle provider, no existing entry — check if pattern matches a busy CPU or is requested
-                            OutputInfo info = getOutputInfo(be);
+                            var info = getOutputInfo(be, null);
                             if (info != null) {
                                 TrackerEntry entry;
                                 if (hasAdjacentInventory(level, immPos)) {
                                     entry = new TrackerEntry(0);
-                                    entry.outputInfo = info;
+                                    entry.outputs = info;
                                     entry.cooldownUntilMs = now + COOLDOWN_MS;
                                 } else {
                                     entry = new TrackerEntry(now);
-                                    entry.outputInfo = info;
+                                    entry.outputs = info;
                                     entry.stuck = true;
                                     entry.lockStartMs = now;
                                 }
@@ -499,56 +506,51 @@ public class CraftTracker {
         return false;
     }
 
-    private static @Nullable OutputInfo getOutputInfo(BlockEntity be) {
+    private static @Nullable List<OutputItem> getOutputInfo(BlockEntity be, @Nullable List<OutputItem> prevOutputs) {
         try {
             IGrid grid = getGrid(be);
-            if (grid == null) {
-                return null;
-            }
+            if (grid == null) return null;
             ICraftingService cs = grid.getCraftingService();
-            if (cs == null) {
-                return null;
-            }
+            if (cs == null) return null;
 
             var patterns = getPatterns(be);
 
-            // Pass 1: prioritize what the CPU is actively crafting (fastest to switch)
+            // Collect up to MAX_OUTPUTS matching items in pattern order to form a queue.
+            // Items that match isCpuCraftingOutput OR isRequesting are included.
+            // The queue naturally advances: when item finishes (no longer matches),
+            // it drops out and remaining items shift forward.
+            List<OutputItem> results = new ArrayList<>();
             for (IPatternDetails pattern : patterns) {
+                if (results.size() >= MAX_OUTPUTS) break;
                 GenericStack output = pattern.getPrimaryOutput();
                 if (output == null) continue;
                 AEKey key = output.what();
-                if (isCpuCraftingOutput(cs, key)) {
-                    return buildOutputInfo(key);
+                if (isCpuCraftingOutput(cs, key) || cs.isRequesting(key)) {
+                    OutputItem item = buildOutputItem(key);
+                    if (item != null) {
+                        results.add(item);
+                    }
                 }
             }
-
-            // Pass 2: fall back to cs.isRequesting (slower to update on item switch)
-            for (IPatternDetails pattern : patterns) {
-                GenericStack output = pattern.getPrimaryOutput();
-                if (output == null) continue;
-                AEKey key = output.what();
-                if (cs.isRequesting(key)) {
-                    return buildOutputInfo(key);
-                }
-            }
+            return results.isEmpty() ? null : results;
         } catch (Exception e) {
             LOGGER.info("getOutputInfo: exception at {}: {}", be.getBlockPos(), e.getMessage());
         }
         return null;
     }
 
-    private static @Nullable OutputInfo buildOutputInfo(AEKey key) {
+    private static @Nullable OutputItem buildOutputItem(AEKey key) {
         ResourceLocation regKey = key.getId();
         if (key instanceof AEItemKey) {
             if (BuiltInRegistries.ITEM.containsKey(regKey)) {
-                return new OutputInfo(regKey, TYPE_ITEM);
+                return new OutputItem(regKey, TYPE_ITEM);
             }
         } else if (key instanceof AEFluidKey) {
             if (BuiltInRegistries.FLUID.containsKey(regKey)) {
-                return new OutputInfo(regKey, TYPE_FLUID);
+                return new OutputItem(regKey, TYPE_FLUID);
             }
         } else if (key instanceof MekanismKey) {
-            return new OutputInfo(regKey, TYPE_CHEMICAL);
+            return new OutputItem(regKey, TYPE_CHEMICAL);
         }
         return null;
     }
@@ -628,7 +630,7 @@ public class CraftTracker {
         long cooldownUntilMs;
         boolean tentative;
         boolean stuck;
-        @Nullable OutputInfo outputInfo;
+        @Nullable List<OutputItem> outputs;
 
         TrackerEntry(long lockStartMs) {
             this.lockStartMs = lockStartMs;

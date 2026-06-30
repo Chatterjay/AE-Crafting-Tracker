@@ -7,6 +7,8 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.blaze3d.vertex.VertexFormat;
 
+import java.util.List;
+
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
@@ -45,6 +47,7 @@ import org.joml.Matrix4f;
 public class CraftHighlightRenderer {
 
     private static final int TYPE_CHEMICAL = 3;
+    private static final int MAX_OUTPUTS = 3;
 
     @SuppressWarnings("deprecation")
     private static final RenderType OVERLAY_NO_DEPTH = RenderType.create(
@@ -138,46 +141,30 @@ public class CraftHighlightRenderer {
         }
         bufferSource.endBatch(OVERLAY_NO_DEPTH);
 
-        // Item sprite pass: billboard sprite in center of each provider
-        VertexConsumer spriteConsumer = bufferSource.getBuffer(SPRITE_NO_DEPTH);
+        // Multi-output sprite pass: billboard sprite(s) for each entry, side by side
+        // Up to 3 sprites, scaled to fit within one block width
         for (HighlightEntry entry : highlights) {
-            if (entry.itemId() == null || entry.outputType() != 0) continue;
-            ItemStack displayStack = new ItemStack(BuiltInRegistries.ITEM.get(entry.itemId()));
-            if (displayStack.isEmpty()) continue;
-            BakedModel model = mc.getItemRenderer().getModel(displayStack, mc.level, mc.player, 0);
-            TextureAtlasSprite sprite = getDisplaySprite(entry.itemId(), model);
-            renderItemSprite(spriteConsumer, poseStack, entry.pos(), camera, sprite);
+            List<HighlightEntry.OutputItem> outputs = entry.outputs();
+            if (outputs == null || outputs.isEmpty()) continue;
+            int count = Math.min(outputs.size(), MAX_OUTPUTS);
+            float spriteSize = 0.28f;
+            float spacing = (count <= 1) ? 0f : 0.25f;
+            float startX = -(count - 1) * spacing / 2f;
+
+            for (int i = 0; i < count; i++) {
+                HighlightEntry.OutputItem out = outputs.get(i);
+                int outputType = out.outputType();
+
+                if (outputType == 0) {
+                    renderEntryItem(entry, out, poseStack, camera, bufferSource, startX + i * spacing, spriteSize);
+                } else if (outputType == 1) {
+                    renderEntryFluid(entry, out, poseStack, camera, bufferSource, startX + i * spacing, spriteSize);
+                } else if (outputType == TYPE_CHEMICAL) {
+                    renderEntryChemical(entry, out, poseStack, camera, bufferSource, mc, startX + i * spacing, spriteSize);
+                }
+            }
         }
         bufferSource.endBatch(SPRITE_NO_DEPTH);
-
-        // Fluid sprite pass: billboard with tint in center of each provider
-        VertexConsumer fluidConsumer = bufferSource.getBuffer(TINTED_SPRITE_NO_DEPTH);
-        for (HighlightEntry entry : highlights) {
-            if (entry.itemId() == null || entry.outputType() != 1) continue;
-            Fluid fluid = BuiltInRegistries.FLUID.get(entry.itemId());
-            if (fluid == null) continue;
-            var ext = IClientFluidTypeExtensions.of(fluid);
-            ResourceLocation stillTex = ext.getStillTexture(new FluidStack(fluid, 1));
-            if (stillTex == null) continue;
-            TextureAtlasSprite sprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(stillTex);
-            int tint = ext.getTintColor(new FluidStack(fluid, 1));
-            renderTintedSprite(fluidConsumer, poseStack, entry.pos(), camera, sprite, tint);
-        }
-        bufferSource.endBatch(TINTED_SPRITE_NO_DEPTH);
-
-        // Chemical sprite pass: billboard with tint in center of each provider
-        VertexConsumer chemicalConsumer = bufferSource.getBuffer(TINTED_SPRITE_NO_DEPTH);
-        for (HighlightEntry entry : highlights) {
-            if (entry.itemId() == null || entry.outputType() != TYPE_CHEMICAL) continue;
-            Registry<Chemical> chemicalRegistry = mc.level.registryAccess().registry(MekanismAPI.CHEMICAL_REGISTRY_NAME).orElse(null);
-            if (chemicalRegistry == null) continue;
-            Chemical chemical = chemicalRegistry.get(entry.itemId());
-            if (chemical == null) continue;
-            ResourceLocation icon = chemical.getIcon();
-            if (icon == null) continue;
-            TextureAtlasSprite sprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(icon);
-            renderTintedSprite(chemicalConsumer, poseStack, entry.pos(), camera, sprite, chemical.getTint());
-        }
         bufferSource.endBatch(TINTED_SPRITE_NO_DEPTH);
 
         // Pass 3: thick lines — wider for visibility
@@ -288,46 +275,93 @@ public class CraftHighlightRenderer {
         return model.getParticleIcon();
     }
 
-    private static void renderItemSprite(VertexConsumer consumer, PoseStack poseStack,
-                                          BlockPos pos, Camera camera, TextureAtlasSprite sprite) {
-        float s = 0.35f;
+    private static void renderEntryItem(HighlightEntry entry, HighlightEntry.OutputItem out,
+                                         PoseStack poseStack, Camera camera,
+                                         MultiBufferSource bufferSource,
+                                         float offsetX, float size) {
+        ItemStack displayStack = new ItemStack(BuiltInRegistries.ITEM.get(out.itemId()));
+        if (displayStack.isEmpty()) return;
+        Minecraft mc = Minecraft.getInstance();
+        BakedModel model = mc.getItemRenderer().getModel(displayStack, mc.level, mc.player, 0);
+        TextureAtlasSprite sprite = getDisplaySprite(out.itemId(), model);
+        VertexConsumer consumer = bufferSource.getBuffer(SPRITE_NO_DEPTH);
+        renderSprite(consumer, poseStack, entry.pos(), camera, offsetX, size, sprite);
+    }
+
+    private static void renderEntryFluid(HighlightEntry entry, HighlightEntry.OutputItem out,
+                                          PoseStack poseStack, Camera camera,
+                                          MultiBufferSource bufferSource,
+                                          float offsetX, float size) {
+        Fluid fluid = BuiltInRegistries.FLUID.get(out.itemId());
+        if (fluid == null) return;
+        var ext = IClientFluidTypeExtensions.of(fluid);
+        ResourceLocation stillTex = ext.getStillTexture(new FluidStack(fluid, 1));
+        if (stillTex == null) return;
+        Minecraft mc = Minecraft.getInstance();
+        TextureAtlasSprite sprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(stillTex);
+        int tint = ext.getTintColor(new FluidStack(fluid, 1));
+        VertexConsumer consumer = bufferSource.getBuffer(TINTED_SPRITE_NO_DEPTH);
+        renderTintedSprite(consumer, poseStack, entry.pos(), camera, offsetX, size, sprite, tint);
+    }
+
+    private static void renderEntryChemical(HighlightEntry entry, HighlightEntry.OutputItem out,
+                                             PoseStack poseStack, Camera camera,
+                                             MultiBufferSource bufferSource, Minecraft mc,
+                                             float offsetX, float size) {
+        Registry<Chemical> chemicalRegistry = mc.level.registryAccess().registry(MekanismAPI.CHEMICAL_REGISTRY_NAME).orElse(null);
+        if (chemicalRegistry == null) return;
+        Chemical chemical = chemicalRegistry.get(out.itemId());
+        if (chemical == null) return;
+        ResourceLocation icon = chemical.getIcon();
+        if (icon == null) return;
+        TextureAtlasSprite sprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(icon);
+        VertexConsumer consumer = bufferSource.getBuffer(TINTED_SPRITE_NO_DEPTH);
+        renderTintedSprite(consumer, poseStack, entry.pos(), camera, offsetX, size, sprite, chemical.getTint());
+    }
+
+    private static void renderSprite(VertexConsumer consumer, PoseStack poseStack,
+                                      BlockPos pos, Camera camera,
+                                      float offsetX, float size,
+                                      TextureAtlasSprite sprite) {
         float u0 = sprite.getU0(), u1 = sprite.getU1();
         float v0 = sprite.getV0(), v1 = sprite.getV1();
 
         poseStack.pushPose();
         poseStack.translate(pos.getX() + 0.5, pos.getY() + 0.35, pos.getZ() + 0.5);
         poseStack.mulPose(camera.rotation());
+        poseStack.translate(offsetX, 0, 0);
 
         Matrix4f matrix = poseStack.last().pose();
-        consumer.addVertex(matrix, -s, -s, 0).setUv(u0, v1);
-        consumer.addVertex(matrix, +s, -s, 0).setUv(u1, v1);
-        consumer.addVertex(matrix, +s, +s, 0).setUv(u1, v0);
-        consumer.addVertex(matrix, -s, +s, 0).setUv(u0, v0);
+        consumer.addVertex(matrix, -size, -size, 0).setUv(u0, v1);
+        consumer.addVertex(matrix, +size, -size, 0).setUv(u1, v1);
+        consumer.addVertex(matrix, +size, +size, 0).setUv(u1, v0);
+        consumer.addVertex(matrix, -size, +size, 0).setUv(u0, v0);
 
         poseStack.popPose();
     }
 
     private static void renderTintedSprite(VertexConsumer consumer, PoseStack poseStack,
-                                            BlockPos pos, Camera camera, TextureAtlasSprite sprite,
-                                            int argb) {
-        float s = 0.35f;
+                                            BlockPos pos, Camera camera,
+                                            float offsetX, float size,
+                                            TextureAtlasSprite sprite, int argb) {
         float u0 = sprite.getU0(), u1 = sprite.getU1();
         float v0 = sprite.getV0(), v1 = sprite.getV1();
         int a = (argb >> 24) & 0xFF;
         int r = (argb >> 16) & 0xFF;
         int g = (argb >> 8) & 0xFF;
         int b = argb & 0xFF;
-        if (a == 0) a = 255; // ensure visibility
+        if (a == 0) a = 255;
 
         poseStack.pushPose();
         poseStack.translate(pos.getX() + 0.5, pos.getY() + 0.35, pos.getZ() + 0.5);
         poseStack.mulPose(camera.rotation());
+        poseStack.translate(offsetX, 0, 0);
 
         Matrix4f matrix = poseStack.last().pose();
-        consumer.addVertex(matrix, -s, -s, 0).setUv(u0, v1).setColor(r, g, b, a);
-        consumer.addVertex(matrix, +s, -s, 0).setUv(u1, v1).setColor(r, g, b, a);
-        consumer.addVertex(matrix, +s, +s, 0).setUv(u1, v0).setColor(r, g, b, a);
-        consumer.addVertex(matrix, -s, +s, 0).setUv(u0, v0).setColor(r, g, b, a);
+        consumer.addVertex(matrix, -size, -size, 0).setUv(u0, v1).setColor(r, g, b, a);
+        consumer.addVertex(matrix, +size, -size, 0).setUv(u1, v1).setColor(r, g, b, a);
+        consumer.addVertex(matrix, +size, +size, 0).setUv(u1, v0).setColor(r, g, b, a);
+        consumer.addVertex(matrix, -size, +size, 0).setUv(u0, v0).setColor(r, g, b, a);
 
         poseStack.popPose();
     }
