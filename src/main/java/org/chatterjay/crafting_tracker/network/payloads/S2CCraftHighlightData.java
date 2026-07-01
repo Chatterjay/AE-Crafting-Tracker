@@ -13,7 +13,7 @@ import net.minecraft.resources.ResourceLocation;
 
 import org.chatterjay.crafting_tracker.Crafting_tracker;
 
-public record S2CCraftHighlightData(List<HighlightEntry> entries) implements CustomPacketPayload {
+public record S2CCraftHighlightData(List<HighlightEntry> entries, int runtimeRemainingTicks) implements CustomPacketPayload {
 
     public static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath(Crafting_tracker.MODID, "craft_highlight");
     public static final CustomPacketPayload.Type<S2CCraftHighlightData> TYPE = new CustomPacketPayload.Type<>(ID);
@@ -26,7 +26,7 @@ public record S2CCraftHighlightData(List<HighlightEntry> entries) implements Cus
     }
 
     public S2CCraftHighlightData(FriendlyByteBuf buf) {
-        this(readEntries(buf));
+        this(readEntries(buf), buf.readVarInt());
     }
 
     public void write(FriendlyByteBuf buf) {
@@ -43,6 +43,7 @@ public record S2CCraftHighlightData(List<HighlightEntry> entries) implements Cus
                 }
             }
         }
+        buf.writeVarInt(runtimeRemainingTicks);
     }
 
     private static List<HighlightEntry> readEntries(FriendlyByteBuf buf) {

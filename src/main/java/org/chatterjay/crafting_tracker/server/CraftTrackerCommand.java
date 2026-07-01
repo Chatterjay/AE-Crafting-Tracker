@@ -55,7 +55,7 @@ public class CraftTrackerCommand {
     private static int executeOff(CommandSourceStack source) throws CommandSyntaxException {
         ServerPlayer player = source.getPlayerOrException();
         CraftTracker.setEnabledFor(player.getUUID(), false);
-        PacketDistributor.sendToPlayer(player, new S2CCraftHighlightData(List.of()));
+        PacketDistributor.sendToPlayer(player, new S2CCraftHighlightData(List.of(), 0));
         player.sendSystemMessage(Component.translatable("chat.crafting_tracker.disabled"));
         return 1;
     }

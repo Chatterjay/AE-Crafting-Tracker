@@ -1,0 +1,49 @@
+{
+  "chat.crafting_tracker.enabled": "合成追踪高亮已启用",
+  "chat.crafting_tracker.disabled": "合成追踪高亮已禁用",
+  "chat.crafting_tracker.status_enabled": "合成追踪：已启用",
+  "chat.crafting_tracker.status_disabled": "合成追踪：已禁用",
+
+  "item.crafting_tracker.network_locator": "网络定位器",
+  "msg.crafting_tracker.locator.bound": "已绑定至 %s 处的 AE 网络",
+  "msg.crafting_tracker.locator.bound_to": "已绑定至 %s 处的 AE 网络",
+  "msg.crafting_tracker.locator.not_bound": "未绑定任何 AE 网络",
+  "msg.crafting_tracker.locator.not_ae": "不是 AE 网络方块",
+  "msg.crafting_tracker.locator.unbound": "已解除 AE 网络绑定",
+  "msg.crafting_tracker.locator.locked": "工具已锁定 — 潜行+空中右键解锁",
+  "msg.crafting_tracker.locator.locked_on": "工具已锁定 — 位置绑定已保护",
+  "msg.crafting_tracker.locator.locked_off": "工具已解锁",
+
+  "button.crafting_tracker.runtime_highlight.on": "停止",
+  "button.crafting_tracker.runtime_highlight.off": "高亮",
+
+  "crafting_tracker.configuration.title": "合成追踪配置",
+  "crafting_tracker.configuration.highlight": "高亮",
+  "crafting_tracker.configuration.scan": "扫描",
+
+  "crafting_tracker.config.highlight.enabled": "默认启用",
+  "crafting_tracker.config.highlight.enabled.tooltip": "是否默认对所有玩家启用合成高亮",
+  "crafting_tracker.config.highlight.stallThresholdSeconds": "卡顿阈值（秒）",
+  "crafting_tracker.config.highlight.stallThresholdSeconds.tooltip": "繁忙供应器从活跃（绿色）变为卡顿（黄色）的秒数",
+  "crafting_tracker.config.highlight.stuckThresholdSeconds": "卡死阈值（秒）",
+  "crafting_tracker.config.highlight.stuckThresholdSeconds.tooltip": "卡顿供应器变为卡死（红色）的秒数",
+  "crafting_tracker.config.scan.scanIntervalTicks": "扫描间隔（tick）",
+  "crafting_tracker.config.scan.scanIntervalTicks.tooltip": "供应器扫描间隔 tick 数（20 = 1 秒）",
+  "crafting_tracker.config.scan.scanRadius": "扫描半径",
+  "crafting_tracker.config.scan.scanRadius.tooltip": "扫描 Pattern Provider 的方块半径",
+
+  "crafting_tracker.configuration.colors": "颜色",
+
+  "crafting_tracker.config.colors.colorActive": "活跃颜色",
+  "crafting_tracker.config.colors.colorActive.tooltip": "活跃（ACTIVE）状态的高亮 RGB 颜色（十进制，如 5635925 = 0x55FF55 绿色）",
+  "crafting_tracker.config.colors.colorStalled": "卡顿颜色",
+  "crafting_tracker.config.colors.colorStalled.tooltip": "卡顿（STALLED）状态的高亮 RGB 颜色",
+  "crafting_tracker.config.colors.colorStuck": "卡死颜色",
+  "crafting_tracker.config.colors.colorStuck.tooltip": "卡死（STUCK）状态的高亮 RGB 颜色",
+  "crafting_tracker.config.colors.fillAlphaInner": "填充不透明度（内层）",
+  "crafting_tracker.config.colors.fillAlphaInner.tooltip": "内层高亮填充的不透明度（0=透明, 255=实心）",
+  "crafting_tracker.config.colors.fillAlphaOuter": "填充不透明度（外层）",
+  "crafting_tracker.config.colors.fillAlphaOuter.tooltip": "外层高亮发光的不透明度（0=透明, 255=实心）",
+  "crafting_tracker.config.colors.outlineAlpha": "边框不透明度",
+  "crafting_tracker.config.colors.outlineAlpha.tooltip": "高亮边框的不透明度（0=透明, 255=实心）"
+}

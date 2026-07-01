@@ -14,17 +14,24 @@ public enum ClientLocatorCache {
     INSTANCE;
 
     private final Map<BlockPos, List<LocatorHit>> hits = new ConcurrentHashMap<>();
+    private volatile int runtimeRemainingTicks = 0;
 
     public void update(S2CLocatorHighlights data) {
         hits.clear();
         hits.putAll(data.hits());
+        runtimeRemainingTicks = data.runtimeRemainingTicks();
     }
 
     public Map<BlockPos, List<LocatorHit>> getActiveHits() {
         return Map.copyOf(hits);
     }
 
+    public int getRuntimeRemainingTicks() {
+        return runtimeRemainingTicks;
+    }
+
     public void clear() {
         hits.clear();
+        runtimeRemainingTicks = 0;
     }
 }

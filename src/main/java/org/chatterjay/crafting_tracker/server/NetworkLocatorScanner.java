@@ -1,6 +1,5 @@
 package org.chatterjay.crafting_tracker.server;
 
-import com.mojang.logging.LogUtils;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -14,7 +13,6 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.neoforged.neoforge.capabilities.Capabilities;
 
 import org.chatterjay.crafting_tracker.network.payloads.S2CLocatorHighlights.LocatorHit;
-import org.slf4j.Logger;
 
 import appeng.api.crafting.IPatternDetails;
 import appeng.helpers.InterfaceLogicHost;
@@ -47,7 +45,6 @@ import java.util.Map;
 import java.util.Set;
 
 public class NetworkLocatorScanner {
-    private static final Logger LOGGER = LogUtils.getLogger();
 
     private static final int TYPE_ITEM = 0;
     private static final int TYPE_CHEMICAL = 3;
@@ -70,35 +67,18 @@ public class NetworkLocatorScanner {
         }
         if (filters.isEmpty()) return results;
 
-        LOGGER.info("[LocatorScan] Scanning with {} filters for player {}", filters.size(), player.getName().getString());
-        for (ItemStack f : filters) {
-            LOGGER.info("[LocatorScan]   Filter: {} x{}", BuiltInRegistries.ITEM.getKey(f.getItem()), f.getCount());
-        }
-
         // Get grid from bound position
         BlockEntity boundBe = level.getBlockEntity(boundPos);
-        if (!(boundBe instanceof IInWorldGridNodeHost host)) {
-            LOGGER.info("[LocatorScan] Bound position {} has no AE host", boundPos);
-            return results;
-        }
+        if (!(boundBe instanceof IInWorldGridNodeHost host)) return results;
 
         IGrid grid = getGrid(host);
-        if (grid == null) {
-            LOGGER.info("[LocatorScan] No grid found at bound position {}", boundPos);
-            return results;
-        }
-        LOGGER.info("[LocatorScan] Got grid, size={}, machine classes:", grid.size());
-        for (var mc : grid.getMachineClasses()) {
-            LOGGER.info("[LocatorScan]   Machine class: {}", mc.getName());
-        }
+        if (grid == null) return results;
 
         // Iterate ALL grid nodes and get owners (both BlockEntities and cable-attached parts)
         Set<BlockPos> visitedPos = new HashSet<>();
         Set<Object> visitedOwners = Collections.newSetFromMap(new IdentityHashMap<>());
-        int totalNodes = 0;
 
         for (IGridNode node : grid.getNodes()) {
-            totalNodes++;
             Object owner = node.getOwner();
 
             BlockPos pos = null;
@@ -109,9 +89,6 @@ public class NetworkLocatorScanner {
                 if (be.isRemoved()) continue;
                 pos = be.getBlockPos();
                 if (!visitedPos.add(pos)) continue;
-
-                LOGGER.info("[LocatorScan]   BE node at {}: {}",
-                        pos, be.getType().builtInRegistryHolder().key().location());
 
                 // 1. Check IItemHandler capability (covers ME Interfaces, chests, etc.)
                 checkItemHandler(be, filters, foundItems, foundTypes);
@@ -141,17 +118,8 @@ public class NetworkLocatorScanner {
             }
 
             if (pos != null && !foundItems.isEmpty()) {
-                LOGGER.info("[LocatorScan]   >>> FOUND {} items at {}", foundItems.size(), pos);
-                for (LocatorHit hit : foundItems) {
-                    LOGGER.info("[LocatorScan]     Hit: {}", hit.itemId());
-                }
                 results.put(pos.immutable(), foundItems);
             }
-        }
-        LOGGER.info("[LocatorScan] {} total nodes", totalNodes);
-
-        if (!results.isEmpty()) {
-            LOGGER.info("[LocatorScan] Scan complete: {} matches for {}", results.size(), player.getName().getString());
         }
 
         return results;

@@ -26,6 +26,9 @@ import org.chatterjay.crafting_tracker.server.CraftTrackerCommand;
 import org.chatterjay.crafting_tracker.server.CraftTrackerNetwork;
 import org.slf4j.Logger;
 
+import net.neoforged.fml.event.config.ModConfigEvent;
+import net.neoforged.fml.loading.FMLEnvironment;
+
 @Mod(Crafting_tracker.MODID)
 public class Crafting_tracker {
     public static final String MODID = "crafting_tracker";
@@ -59,6 +62,18 @@ public class Crafting_tracker {
 
         modContainer.registerConfig(ModConfig.Type.COMMON, CTConfig.SPEC);
 
+        // Client-only: register NeoForge built-in config screen
+        if (FMLEnvironment.dist == net.neoforged.api.distmarker.Dist.CLIENT) {
+            registerConfigScreenReflectively(modContainer);
+        }
+
+        modEventBus.addListener((ModConfigEvent.Loading e) -> {
+            CTConfig.onLoad(e);
+        });
+        modEventBus.addListener((ModConfigEvent.Reloading e) -> {
+            CTConfig.onReload(e);
+        });
+
         modEventBus.addListener(RegisterPayloadHandlersEvent.class,
                 (event) -> CraftTrackerNetwork.register(event));
 
@@ -70,16 +85,40 @@ public class Crafting_tracker {
                 (event) -> CraftTracker.onServerTick(event.getServer()));
         NeoForge.EVENT_BUS.addListener(RegisterCommandsEvent.class,
                 (event) -> CraftTrackerCommand.register(event.getDispatcher()));
-
-        // Client-only: log EMI availability at startup for debugging
+        // Client-only: register CraftingScreenHandler and log EMI availability
         modEventBus.addListener(net.neoforged.fml.event.lifecycle.FMLClientSetupEvent.class, event -> {
             event.enqueueWork(() -> {
+                org.chatterjay.crafting_tracker.client.handler.CraftingScreenHandler.register();
                 if (net.neoforged.fml.ModList.get().isLoaded("emi")) {
-                    LOGGER.info("[Locator] EMI detected, plugin will load via META-INF/services");
-                } else {
-                    LOGGER.info("[Locator] EMI not installed, drag-drop disabled");
+                    LOGGER.info("[Locator] EMI detected");
                 }
             });
         });
+    }
+
+    /** Client-only: register NeoForge built-in config screen via reflection. */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static void registerConfigScreenReflectively(net.neoforged.fml.ModContainer container) {
+        try {
+            Class<?> factoryClass = Class.forName("net.neoforged.neoforge.client.gui.IConfigScreenFactory");
+            Class<?> configScreenClass = Class.forName("net.neoforged.neoforge.client.gui.ConfigurationScreen");
+            Class<?> screenClass = Class.forName("net.minecraft.client.gui.screens.Screen");
+            var ctor = configScreenClass.getConstructor(net.neoforged.fml.ModContainer.class, screenClass);
+            var regMethod = net.neoforged.fml.ModContainer.class.getMethod("registerExtensionPoint", Class.class, java.util.function.Supplier.class);
+
+            Object factory = java.lang.reflect.Proxy.newProxyInstance(
+                    factoryClass.getClassLoader(),
+                    new Class<?>[]{factoryClass},
+                    (_proxy, method, args) -> {
+                        if ("createScreen".equals(method.getName()) && args != null && args.length == 2) {
+                            return ctor.newInstance(container, args[1]);
+                        }
+                        return null;
+                    });
+
+            regMethod.invoke(container, factoryClass, (java.util.function.Supplier) () -> factory);
+        } catch (Exception e) {
+            LOGGER.warn("[CT] Could not register config screen: {}", e.getMessage());
+        }
     }
 }

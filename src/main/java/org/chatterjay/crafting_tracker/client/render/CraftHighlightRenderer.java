@@ -41,6 +41,7 @@ import org.chatterjay.crafting_tracker.Crafting_tracker;
 import org.chatterjay.crafting_tracker.api.CraftStatus;
 import org.chatterjay.crafting_tracker.client.ClientHighlightCache;
 import org.chatterjay.crafting_tracker.client.ClientLocatorCache;
+import org.chatterjay.crafting_tracker.config.CTConfig;
 import org.chatterjay.crafting_tracker.network.payloads.S2CCraftHighlightData.HighlightEntry;
 import org.chatterjay.crafting_tracker.network.payloads.S2CLocatorHighlights.LocatorHit;
 import org.joml.Matrix4f;
@@ -52,6 +53,16 @@ public class CraftHighlightRenderer {
 
     private static final int TYPE_CHEMICAL = 3;
     private static final int MAX_OUTPUTS = 3;
+
+    /** Get the highlight color for a provider status ordinal (reads from config). */
+    private static int getProviderColor(int ordinal) {
+        return switch (ordinal) {
+            case 0 -> CTConfig.colorActive;
+            case 1 -> CTConfig.colorStalled;
+            case 2 -> CTConfig.colorStuck;
+            default -> 0xFFFFFF;
+        };
+    }
 
     @SuppressWarnings("deprecation")
     private static final RenderType OVERLAY_NO_DEPTH = RenderType.create(
@@ -138,14 +149,14 @@ public class CraftHighlightRenderer {
         // === Pass 1: Fill (providers + locators) ===
         VertexConsumer fillConsumer = bufferSource.getBuffer(OVERLAY_NO_DEPTH);
 
-        // Provider fills
+        // Provider fills (colors from config)
         for (HighlightEntry entry : highlights) {
-            CraftStatus status = CraftStatus.values()[entry.statusOrdinal()];
-            int r = (status.color >> 16) & 0xFF;
-            int g = (status.color >> 8) & 0xFF;
-            int b = status.color & 0xFF;
-            renderBoxFill(fillConsumer, poseMatrix, entry.pos(), r, g, b, 30, 0.05f);
-            renderBoxFill(fillConsumer, poseMatrix, entry.pos(), r, g, b, 80, 0.005f);
+            int color = getProviderColor(entry.statusOrdinal());
+            int r = (color >> 16) & 0xFF;
+            int g = (color >> 8) & 0xFF;
+            int b = color & 0xFF;
+            renderBoxFill(fillConsumer, poseMatrix, entry.pos(), r, g, b, CTConfig.fillAlphaInner, 0.05f);
+            renderBoxFill(fillConsumer, poseMatrix, entry.pos(), r, g, b, CTConfig.fillAlphaOuter, 0.005f);
         }
         // Locator fills (blue)
         for (var entry : locatorHits.entrySet()) {
@@ -205,13 +216,13 @@ public class CraftHighlightRenderer {
         // === Pass 3: Lines (providers + locators) ===
         RenderSystem.lineWidth(3f);
         VertexConsumer lineConsumer = bufferSource.getBuffer(RenderType.lines());
-        // Provider outlines
+        // Provider outlines (colors from config)
         for (HighlightEntry entry : highlights) {
-            CraftStatus status = CraftStatus.values()[entry.statusOrdinal()];
-            int r = (status.color >> 16) & 0xFF;
-            int g = (status.color >> 8) & 0xFF;
-            int b = status.color & 0xFF;
-            renderBoxOutline(lineConsumer, poseMatrix, poseEntry, entry.pos(), r, g, b, 255);
+            int color = getProviderColor(entry.statusOrdinal());
+            int r = (color >> 16) & 0xFF;
+            int g = (color >> 8) & 0xFF;
+            int b = color & 0xFF;
+            renderBoxOutline(lineConsumer, poseMatrix, poseEntry, entry.pos(), r, g, b, CTConfig.outlineAlpha);
         }
         // Locator outlines (blue)
         for (BlockPos pos : locatorHits.keySet()) {

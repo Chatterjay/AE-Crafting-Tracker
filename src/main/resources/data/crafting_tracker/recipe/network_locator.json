@@ -1,0 +1,22 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": [
+    "PEP",
+    "ENE",
+    "PEP"
+  ],
+  "key": {
+    "P": {
+      "item": "ae2:calculation_processor"
+    },
+    "E": {
+      "item": "minecraft:ender_eye"
+    },
+    "N": {
+      "item": "ae2:network_tool"
+    }
+  },
+  "result": {
+    "id": "crafting_tracker:network_locator"
+  }
+}

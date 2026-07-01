@@ -13,7 +13,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-public record S2CLocatorHighlights(Map<BlockPos, List<LocatorHit>> hits) implements CustomPacketPayload {
+public record S2CLocatorHighlights(Map<BlockPos, List<LocatorHit>> hits, int runtimeRemainingTicks) implements CustomPacketPayload {
 
     public static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath(Crafting_tracker.MODID, "locator_highlights");
     public static final CustomPacketPayload.Type<S2CLocatorHighlights> TYPE = new CustomPacketPayload.Type<>(ID);
@@ -24,7 +24,7 @@ public record S2CLocatorHighlights(Map<BlockPos, List<LocatorHit>> hits) impleme
     public record LocatorHit(ResourceLocation itemId, int outputType) {}
 
     public S2CLocatorHighlights(FriendlyByteBuf buf) {
-        this(readHits(buf));
+        this(readHits(buf), buf.readVarInt());
     }
 
     public void write(FriendlyByteBuf buf) {
@@ -38,6 +38,7 @@ public record S2CLocatorHighlights(Map<BlockPos, List<LocatorHit>> hits) impleme
                 buf.writeVarInt(hit.outputType());
             }
         }
+        buf.writeVarInt(runtimeRemainingTicks);
     }
 
     private static Map<BlockPos, List<LocatorHit>> readHits(FriendlyByteBuf buf) {

@@ -18,7 +18,8 @@ import net.neoforged.neoforge.network.PacketDistributor;
 
 public class NetworkLocatorScreen extends AbstractContainerScreen<NetworkLocatorMenu> {
 
-    private static final Logger LOGGER = LogUtils.getLogger();    // AE2's toolbox texture — same background used by Network Tool
+    private static final Logger LOGGER = LogUtils.getLogger();
+    // AE2's toolbox texture — same background used by Network Tool
     private static final ResourceLocation BACKGROUND =
             ResourceLocation.parse("ae2:textures/guis/toolbox.png");
 
@@ -34,7 +35,6 @@ public class NetworkLocatorScreen extends AbstractContainerScreen<NetworkLocator
 
     @Override
     protected void renderBg(GuiGraphics guiGraphics, float partialTick, int mouseX, int mouseY) {
-        // Background
         int x = (this.width - this.imageWidth) / 2;
         int y = (this.height - this.imageHeight) / 2;
         guiGraphics.blit(BACKGROUND, x, y, 0, 0, WINDOW_W, WINDOW_H, 256, 256);
@@ -42,7 +42,6 @@ public class NetworkLocatorScreen extends AbstractContainerScreen<NetworkLocator
 
     @Override
     protected void renderLabels(GuiGraphics guiGraphics, int mouseX, int mouseY) {
-        // Title
         guiGraphics.drawString(this.font, this.title, 8, 6, 0x404040, false);
     }
 
@@ -67,7 +66,6 @@ public class NetworkLocatorScreen extends AbstractContainerScreen<NetworkLocator
     }
 
     private boolean isGhostSlot(Slot slot) {
-        // Ghost slots are the first 9 slots (index 0-8) in the container
         return slot.index >= 0 && slot.index < 9;
     }
 }

@@ -14,19 +14,26 @@ public enum ClientHighlightCache {
     INSTANCE;
 
     private final Map<BlockPos, HighlightEntry> highlights = new ConcurrentHashMap<>();
+    private volatile int runtimeRemainingTicks = 0;
 
     public void update(S2CCraftHighlightData data) {
         highlights.clear();
         for (HighlightEntry entry : data.entries()) {
             highlights.put(entry.pos(), entry);
         }
+        runtimeRemainingTicks = data.runtimeRemainingTicks();
     }
 
     public List<HighlightEntry> getActiveHighlights() {
         return new ArrayList<>(highlights.values());
     }
 
+    public int getRuntimeRemainingTicks() {
+        return runtimeRemainingTicks;
+    }
+
     public void clear() {
         highlights.clear();
+        runtimeRemainingTicks = 0;
     }
 }

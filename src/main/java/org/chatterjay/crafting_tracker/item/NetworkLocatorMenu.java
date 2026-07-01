@@ -19,6 +19,7 @@ import net.minecraft.world.item.ItemStack;
 
 import org.chatterjay.crafting_tracker.Crafting_tracker;
 import org.chatterjay.crafting_tracker.network.payloads.S2CLocatorHighlights;
+import org.chatterjay.crafting_tracker.server.CraftTracker;
 import org.chatterjay.crafting_tracker.server.NetworkLocatorScanner;
 import org.jetbrains.annotations.Nullable;
 
@@ -214,8 +215,9 @@ public class NetworkLocatorMenu extends AbstractContainerMenu {
 
     private void sendHighlights(Map<BlockPos, List<S2CLocatorHighlights.LocatorHit>> results) {
         if (player instanceof ServerPlayer sp) {
-            LOGGER.info("[LocatorMenu] Sending {} highlight entries to player {}", results.size(), player.getName().getString());
-            S2CLocatorHighlights packet = new S2CLocatorHighlights(results);
+            long gameTime = sp.serverLevel().getGameTime();
+            int remaining = CraftTracker.getRuntimeRemainingTicks(sp.getUUID(), gameTime);
+            S2CLocatorHighlights packet = new S2CLocatorHighlights(results, remaining);
             net.neoforged.neoforge.network.PacketDistributor.sendToPlayer(sp, packet);
         }
     }
