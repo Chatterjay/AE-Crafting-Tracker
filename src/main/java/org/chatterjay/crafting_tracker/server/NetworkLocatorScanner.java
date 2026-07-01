@@ -17,6 +17,7 @@ import org.chatterjay.crafting_tracker.network.payloads.S2CLocatorHighlights.Loc
 import org.slf4j.Logger;
 
 import appeng.api.crafting.IPatternDetails;
+import appeng.helpers.InterfaceLogicHost;
 import appeng.api.networking.IGrid;
 import appeng.api.networking.IGridNode;
 import appeng.api.networking.IInWorldGridNodeHost;
@@ -24,6 +25,12 @@ import appeng.api.stacks.AEItemKey;
 import appeng.api.stacks.AEKey;
 import appeng.api.stacks.GenericStack;
 import appeng.helpers.patternprovider.PatternProviderLogicHost;
+import appeng.parts.AEBasePart;
+import appeng.parts.automation.ExportBusPart;
+import appeng.parts.automation.IOBusPart;
+import appeng.parts.automation.ImportBusPart;
+import appeng.parts.automation.StorageLevelEmitterPart;
+import appeng.parts.storagebus.StorageBusPart;
 
 import com.glodblock.github.extendedae.common.tileentities.matrix.TileAssemblerMatrixPattern;
 
@@ -31,8 +38,10 @@ import net.pedroksl.advanced_ae.common.logic.AdvPatternProviderLogicHost;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -83,46 +92,63 @@ public class NetworkLocatorScanner {
             LOGGER.info("[LocatorScan]   Machine class: {}", mc.getName());
         }
 
-        // Iterate ALL grid nodes and get BlockEntity owners
-        Set<BlockPos> visited = new HashSet<>();
+        // Iterate ALL grid nodes and get owners (both BlockEntities and cable-attached parts)
+        Set<BlockPos> visitedPos = new HashSet<>();
+        Set<Object> visitedOwners = Collections.newSetFromMap(new IdentityHashMap<>());
         int totalNodes = 0;
-        int beNodes = 0;
 
         for (IGridNode node : grid.getNodes()) {
             totalNodes++;
             Object owner = node.getOwner();
-            if (!(owner instanceof BlockEntity be)) continue;
-            if (be.isRemoved()) continue;
 
-            BlockPos pos = be.getBlockPos();
-            if (!visited.add(pos)) continue; // deduplicate
-            beNodes++;
-
-            LOGGER.info("[LocatorScan]   #{} BE node at {}: {}",
-                    beNodes, pos, be.getType().builtInRegistryHolder().key().location());
-
+            BlockPos pos = null;
             List<LocatorHit> foundItems = new ArrayList<>();
             Set<ResourceLocation> foundTypes = new HashSet<>();
 
-            // 1. Check IItemHandler capability (covers ME Interfaces, chests, etc.)
-            checkItemHandler(be, filters, foundItems, foundTypes);
+            if (owner instanceof BlockEntity be) {
+                if (be.isRemoved()) continue;
+                pos = be.getBlockPos();
+                if (!visitedPos.add(pos)) continue;
 
-            // 2. Check pattern provider patterns (only if we have room)
-            if (foundTypes.size() < MAX_HITS_PER_POS) {
-                checkPatterns(be, filters, foundItems, foundTypes);
+                LOGGER.info("[LocatorScan]   BE node at {}: {}",
+                        pos, be.getType().builtInRegistryHolder().key().location());
+
+                // 1. Check IItemHandler capability (covers ME Interfaces, chests, etc.)
+                checkItemHandler(be, filters, foundItems, foundTypes);
+
+                // 2. Check pattern provider patterns (only if we have room)
+                if (foundTypes.size() < MAX_HITS_PER_POS) {
+                    checkPatterns(owner, filters, foundItems, foundTypes);
+                }
+            } else if (owner instanceof StorageBusPart bus) {
+                pos = getPartPos(bus);
+                if (pos == null || !visitedOwners.add(owner)) continue;
+                checkStorageBus(level, bus, filters, foundItems, foundTypes);
+            } else if (owner instanceof IOBusPart bus) {
+                pos = getPartPos(bus);
+                if (pos == null || !visitedOwners.add(owner)) continue;
+                checkIOBusConfig(bus, filters, foundItems, foundTypes);
+            } else if (owner instanceof AEBasePart part) {
+                pos = getPartPos(part);
+                if (pos == null || !visitedOwners.add(owner)) continue;
+                checkPatterns(owner, filters, foundItems, foundTypes);
+                if (foundTypes.size() < MAX_HITS_PER_POS && owner instanceof InterfaceLogicHost ifaceHost) {
+                    checkInterfaceInventory(ifaceHost, filters, foundItems, foundTypes);
+                }
+                if (foundTypes.size() < MAX_HITS_PER_POS && owner instanceof StorageLevelEmitterPart emitter) {
+                    checkLevelEmitterConfig(emitter, filters, foundItems, foundTypes);
+                }
             }
 
-            if (!foundItems.isEmpty()) {
+            if (pos != null && !foundItems.isEmpty()) {
                 LOGGER.info("[LocatorScan]   >>> FOUND {} items at {}", foundItems.size(), pos);
                 for (LocatorHit hit : foundItems) {
                     LOGGER.info("[LocatorScan]     Hit: {}", hit.itemId());
                 }
                 results.put(pos.immutable(), foundItems);
-            } else {
-                LOGGER.info("[LocatorScan]   No match at {}", pos);
             }
         }
-        LOGGER.info("[LocatorScan] {} total nodes, {} BlockEntity owners", totalNodes, beNodes);
+        LOGGER.info("[LocatorScan] {} total nodes", totalNodes);
 
         if (!results.isEmpty()) {
             LOGGER.info("[LocatorScan] Scan complete: {} matches for {}", results.size(), player.getName().getString());
@@ -159,8 +185,8 @@ public class NetworkLocatorScanner {
         }
     }
 
-    private static void checkPatterns(BlockEntity be, List<ItemStack> filters, List<LocatorHit> foundItems, Set<ResourceLocation> foundTypes) {
-        List<IPatternDetails> patterns = getPatterns(be);
+    private static void checkPatterns(Object owner, List<ItemStack> filters, List<LocatorHit> foundItems, Set<ResourceLocation> foundTypes) {
+        List<IPatternDetails> patterns = getPatterns(owner);
         if (patterns.isEmpty()) return;
 
         for (IPatternDetails pattern : patterns) {
@@ -178,10 +204,10 @@ public class NetworkLocatorScanner {
         }
     }
 
-    private static List<IPatternDetails> getPatterns(BlockEntity be) {
-        if (be instanceof PatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
-        if (be instanceof TileAssemblerMatrixPattern matrix) return matrix.getAvailablePatterns();
-        if (be instanceof AdvPatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
+    private static List<IPatternDetails> getPatterns(Object owner) {
+        if (owner instanceof PatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
+        if (owner instanceof TileAssemblerMatrixPattern matrix) return matrix.getAvailablePatterns();
+        if (owner instanceof AdvPatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
         return List.of();
     }
 
@@ -205,6 +231,93 @@ public class NetworkLocatorScanner {
         ResourceLocation id = BuiltInRegistries.ITEM.getKey(filter.getItem());
         if (foundTypes.add(id)) {
             foundItems.add(buildHit(filter));
+        }
+    }
+
+    // --- Part (cable-attached) helpers ---
+
+    @Nullable
+    private static BlockPos getPartPos(AEBasePart part) {
+        var be = part.getHost().getBlockEntity();
+        return be != null ? be.getBlockPos() : null;
+    }
+
+    /**
+     * Check the inventory behind a storage bus for filter items.
+     */
+    private static void checkStorageBus(ServerLevel level, StorageBusPart bus, List<ItemStack> filters,
+                                         List<LocatorHit> foundItems, Set<ResourceLocation> foundTypes) {
+        Direction side = bus.getSide();
+        BlockPos cablePos = bus.getHost().getBlockEntity().getBlockPos();
+        BlockPos targetPos = cablePos.relative(side);
+
+        var cap = level.getCapability(Capabilities.ItemHandler.BLOCK, targetPos, side.getOpposite());
+        if (cap == null) return;
+
+        for (int i = 0; i < cap.getSlots() && foundTypes.size() < MAX_HITS_PER_POS; i++) {
+            ItemStack slotStack = cap.getStackInSlot(i);
+            if (slotStack.isEmpty()) continue;
+            for (ItemStack filter : filters) {
+                if (filter.getItem() == slotStack.getItem()) {
+                    tryAddHit(foundItems, foundTypes, filter);
+                    break;
+                }
+            }
+        }
+    }
+
+    /**
+     * Check the filter config of an import/export bus for matching items.
+     */
+    private static void checkIOBusConfig(IOBusPart bus, List<ItemStack> filters,
+                                          List<LocatorHit> foundItems, Set<ResourceLocation> foundTypes) {
+        var config = bus.getConfig();
+        for (int i = 0; i < config.size() && foundTypes.size() < MAX_HITS_PER_POS; i++) {
+            var key = config.getKey(i);
+            if (!(key instanceof AEItemKey itemKey)) continue;
+            for (ItemStack filter : filters) {
+                if (filter.getItem() == itemKey.getItem()) {
+                    tryAddHit(foundItems, foundTypes, filter);
+                    break;
+                }
+            }
+        }
+    }
+
+    /**
+     * Check the internal buffer of an ME Interface part for matching items.
+     */
+    private static void checkInterfaceInventory(InterfaceLogicHost host, List<ItemStack> filters,
+                                                 List<LocatorHit> foundItems, Set<ResourceLocation> foundTypes) {
+        var storage = host.getStorage();
+        if (storage == null) return;
+        for (int i = 0; i < storage.size() && foundTypes.size() < MAX_HITS_PER_POS; i++) {
+            var stack = storage.getStack(i);
+            if (stack == null) continue;
+            for (ItemStack filter : filters) {
+                if (keyMatchesFilter(stack.what(), filter)) {
+                    tryAddHit(foundItems, foundTypes, filter);
+                    break;
+                }
+            }
+        }
+    }
+
+    /**
+     * Check the config of a Level Emitter part for matching items.
+     */
+    private static void checkLevelEmitterConfig(StorageLevelEmitterPart emitter, List<ItemStack> filters,
+                                                 List<LocatorHit> foundItems, Set<ResourceLocation> foundTypes) {
+        var config = emitter.getConfig();
+        for (int i = 0; i < config.size() && foundTypes.size() < MAX_HITS_PER_POS; i++) {
+            var key = config.getKey(i);
+            if (!(key instanceof AEItemKey itemKey)) continue;
+            for (ItemStack filter : filters) {
+                if (filter.getItem() == itemKey.getItem()) {
+                    tryAddHit(foundItems, foundTypes, filter);
+                    break;
+                }
+            }
         }
     }
 }
