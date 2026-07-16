@@ -296,8 +296,8 @@ public class CraftHighlightRenderer {
         float right = labelWidth / 2f;
         float topY = -4f;
         float bottomY = labelHeight - 4f;
-        int panelAlpha = Math.max(75, Math.min(180, CTConfig.fillAlphaInner + 75));
-        int accentAlpha = Math.max(130, Math.min(255, CTConfig.fillAlphaOuter + 120));
+        int panelAlpha = Math.max(75, Math.min(180, CTConfig.badgeBackgroundAlpha + 75));
+        int accentAlpha = Math.max(130, Math.min(255, CTConfig.badgeAccentAlpha + 120));
 
         quad4(background, matrix, left, topY, 0f, left, bottomY, 0f, right, bottomY, 0f, right, topY, 0f,
                 (PANEL_COLOR >> 16) & 0xFF, (PANEL_COLOR >> 8) & 0xFF, PANEL_COLOR & 0xFF, panelAlpha);

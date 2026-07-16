@@ -128,8 +128,8 @@ public final class CTConfig {
     public static int colorActive;
     public static int colorStalled;
     public static int colorStuck;
-    public static int fillAlphaInner;
-    public static int fillAlphaOuter;
+    public static int badgeBackgroundAlpha;
+    public static int badgeAccentAlpha;
     public static int outlineAlpha;
     public static boolean debugTracking;
     public static int debugLogIntervalTicks;
@@ -157,8 +157,8 @@ public final class CTConfig {
         colorActive = parseColor(COLOR_ACTIVE.get(), DEFAULT_COLOR_ACTIVE, "appearance.colors.active");
         colorStalled = parseColor(COLOR_STALLED.get(), DEFAULT_COLOR_STALLED, "appearance.colors.stalled");
         colorStuck = parseColor(COLOR_STUCK.get(), DEFAULT_COLOR_STUCK, "appearance.colors.stuck");
-        fillAlphaInner = BADGE_BACKGROUND_ALPHA.get();
-        fillAlphaOuter = BADGE_ACCENT_ALPHA.get();
+        badgeBackgroundAlpha = BADGE_BACKGROUND_ALPHA.get();
+        badgeAccentAlpha = BADGE_ACCENT_ALPHA.get();
         outlineAlpha = OUTLINE_ALPHA.get();
         debugTracking = DEBUG_TRACKING.get();
         debugLogIntervalTicks = DEBUG_LOG_INTERVAL_TICKS.get();

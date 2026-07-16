@@ -15,17 +15,17 @@
   "msg.crafting_tracker.locator.locked_off": "工具已解锁",
 
   "button.crafting_tracker.runtime_highlight.on": "停止",
-  "button.crafting_tracker.runtime_highlight.off": "高亮",
+  "button.crafting_tracker.runtime_highlight.off": "运行",
 
   "overlay.crafting_tracker.status.active": "制作中",
   "overlay.crafting_tracker.status.stalled": "变慢",
   "overlay.crafting_tracker.status.stuck": "阻塞",
   "overlay.crafting_tracker.status.crafting": "制作",
-  "overlay.crafting_tracker.outputs": "%s 项",
+  "overlay.crafting_tracker.outputs": "%s 输出",
   "overlay.crafting_tracker.locator": "定位",
-  "overlay.crafting_tracker.matches": "%s 项",
+  "overlay.crafting_tracker.matches": "%s 匹配",
 
-  "crafting_tracker.configuration.title": "合成追踪配置",
+  "crafting_tracker.configuration.title": "AE 合成追踪",
   "crafting_tracker.configuration.status": "状态判定",
   "crafting_tracker.configuration.scan": "扫描",
   "crafting_tracker.configuration.appearance": "显示",
@@ -37,11 +37,11 @@
   "crafting_tracker.configuration.status.button": "状态判定",
   "crafting_tracker.configuration.status.tooltip": "状态阈值",
   "crafting_tracker.configuration.scan.button": "扫描",
-  "crafting_tracker.configuration.scan.tooltip": "供应器扫描",
+  "crafting_tracker.configuration.scan.tooltip": "供应器扫描范围和间隔",
   "crafting_tracker.configuration.appearance.button": "显示",
   "crafting_tracker.configuration.appearance.tooltip": "颜色和透明度",
   "crafting_tracker.configuration.diagnostics.button": "诊断",
-  "crafting_tracker.configuration.diagnostics.tooltip": "调试日志",
+  "crafting_tracker.configuration.diagnostics.tooltip": "追踪诊断",
   "crafting_tracker.configuration.section.crafting.tracker.common.toml": "通用",
   "crafting_tracker.configuration.section.crafting.tracker.common.toml.title": "合成追踪",
 
@@ -69,8 +69,8 @@
   "crafting_tracker.config.appearance.opacity.outline": "外框",
   "crafting_tracker.config.appearance.opacity.outline.tooltip": "贴合方块形状的高亮外框不透明度（0=透明, 255=实心）",
 
-  "crafting_tracker.config.diagnostics.debugTracking": "追踪诊断日志",
-  "crafting_tracker.config.diagnostics.debugTracking.tooltip": "记录详细供应器追踪状态，用于排查闪烁或状态不更新",
+  "crafting_tracker.config.diagnostics.debugTracking": "追踪诊断",
+  "crafting_tracker.config.diagnostics.debugTracking.tooltip": "记录详细供应器状态转换，用于排查闪烁或状态不更新",
   "crafting_tracker.config.diagnostics.debugLogIntervalTicks": "诊断日志间隔（tick）",
   "crafting_tracker.config.diagnostics.debugLogIntervalTicks.tooltip": "同一供应器重复输出诊断日志的最小 tick 间隔"
 }

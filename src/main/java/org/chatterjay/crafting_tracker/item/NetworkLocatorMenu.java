@@ -140,20 +140,22 @@ public class NetworkLocatorMenu extends AbstractContainerMenu {
 
     public void setFilterSlot(int slotIndex, ItemStack stack) {
         if (!isFilterSlot(slotIndex)) return;
-        ItemStack ghostStack = stack.isEmpty() ? ItemStack.EMPTY : stack.copyWithCount(1);
-        getSlot(slotIndex).set(ghostStack);
+        getSlot(slotIndex).set(toGhostStack(stack));
     }
 
     public void updateFilterSlot(int slotIndex, ItemStack stack) {
         if (!isFilterSlot(slotIndex)) return;
-        ItemStack ghostStack = stack.isEmpty() ? ItemStack.EMPTY : stack.copyWithCount(1);
         suppressFilterUpdates = true;
         try {
-            getSlot(slotIndex).set(ghostStack);
+            getSlot(slotIndex).set(toGhostStack(stack));
         } finally {
             suppressFilterUpdates = false;
         }
         onFiltersChanged();
+    }
+
+    public static ItemStack toGhostStack(ItemStack stack) {
+        return stack.isEmpty() ? ItemStack.EMPTY : stack.copyWithCount(1);
     }
 
     public boolean isFilterSlot(int slotIndex) {

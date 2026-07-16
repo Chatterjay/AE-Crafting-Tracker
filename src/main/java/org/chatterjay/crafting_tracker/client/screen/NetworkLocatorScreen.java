@@ -60,7 +60,7 @@ public class NetworkLocatorScreen extends AbstractContainerScreen<NetworkLocator
 
     public void applyGhostFilter(int slotIndex, ItemStack stack) {
         if (!this.menu.isFilterSlot(slotIndex)) return;
-        ItemStack ghostStack = stack.isEmpty() ? ItemStack.EMPTY : stack.copyWithCount(1);
+        ItemStack ghostStack = NetworkLocatorMenu.toGhostStack(stack);
         this.menu.setFilterSlot(slotIndex, ghostStack);
         PacketDistributor.sendToServer(new C2SUpdateFilterSlot(slotIndex, ghostStack));
     }
