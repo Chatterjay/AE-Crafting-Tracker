@@ -1,111 +1,56 @@
-# AE Crafting Tracker
+# AE Crafting Tracker（AE 合成追踪器）
 
-[Chinese](README_ZH.md)
+AE Crafting Tracker 是一个用于 Minecraft NeoForge 1.21.1 的 AE2 合成可视化模组。它会在世界中高亮样板供应器，显示精简的合成状态牌和输出预览，并提供“网络定位器”用于按过滤物品查找 AE 网络中的相关方块。
 
-AE Crafting Tracker is a Minecraft NeoForge 1.21.1 mod for visualizing AE2 crafting activity in-world. It highlights pattern providers, shows compact crafting status badges, previews requested outputs, and provides a Network Locator tool for finding AE network blocks from filter items.
+## 功能
 
-## Features
+### 供应器高亮
 
-### Provider Highlights
+- 根据方块实际可见形状绘制外轮廓，避免粗描边在内部产生多层线条。
+- 悬浮状态牌和输出图标分离显示，减少重叠。
+- 按状态显示制作中、变慢、阻塞三类颜色。
+- 支持 AE2 物品、流体，以及已支持的化学品输出追踪。
+- 针对机器合成流程增加恢复判断：供应器自身空闲但相邻机器正在工作时，不会继续被旧计时判定为阻塞。
+- 支持从 AE 合成状态界面或网络定位器流程临时启用运行时高亮。
 
-- Shape-aware outlines that follow the visible block shape instead of drawing heavy internal lines.
-- Floating status badges with output previews, placed to avoid overlapping item icons.
-- Status colors for active, slow, and blocked providers.
-- Output tracking for AE2 item, fluid, and supported chemical outputs.
-- Recovery detection for machine workflows where the provider is idle but an adjacent machine is actively processing.
-- Runtime highlight mode controlled from the AE crafting status screen or Network Locator workflow.
+### 网络定位器
 
-### Network Locator
+- 可合成的定位工具，用于扫描已绑定的 AE 网络。
+- 提供 9 个幽灵过滤槽位。
+- 支持从 EMI 拖入虚拟过滤物品。
+- 从 EMI 拖拽物品悬停到可用过滤槽时会显示高亮反馈。
+- 定位器追踪独立于普通供应器高亮配置运行。
+- 丢弃、解绑或切换网络时会立即清除旧高亮。
 
-- Craftable locator item for scanning a bound AE network.
-- Nine ghost filter slots for target items.
-- EMI drag-and-drop support for the virtual filter slots.
-- Highlight feedback while dragging EMI stacks over compatible filter slots.
-- Independent locator tracking that continues even when normal provider highlighting is not enabled.
-- Immediate highlight clearing when the locator is dropped, unbound, or switched to another network.
+### 配置
 
-### EMI and EmiLink
+配置已拆分为更清晰的分组：
 
-- Built-in EMI compatibility for the Network Locator screen.
-- Compatible with EmiLink quick-fill behavior for filling locator ghost slots from EMI with the configured quick-fill key.
+- `status`：变慢和阻塞阈值。
+- `scan`：扫描半径和完整扫描间隔。
+- `appearance.colors`：十六进制 RGB 颜色，例如 `#55FF55`。
+- `appearance.opacity`：状态牌和轮廓透明度。
+- `diagnostics`：可选的追踪诊断日志。
 
-### Configuration
+## 状态颜色
 
-Configuration is split into focused groups:
+- 制作中：供应器或相关合成请求仍在推进。
+- 变慢：请求持续时间超过配置的变慢阈值。
+- 阻塞：请求超过阻塞阈值、供应器被锁定，或检测到明确的发配/输出问题。
 
-- `status`: slow and blocked thresholds.
-- `scan`: scan radius and full scan interval.
-- `appearance.colors`: hex RGB colors such as `#55FF55`.
-- `appearance.opacity`: badge and outline opacity.
-- `diagnostics`: optional tracking debug logs.
+对于机器合成，供应器可能已经把物品发给机器，但自身仍显示为空闲。追踪器会检查相邻机器常见的状态属性，例如 `active`、`lit`、`working`、`running`、`crafting`、`processing`，避免机器恢复运行后仍被旧计时标记为阻塞。
 
-Provider highlighting is not enabled by default through configuration. Use the runtime controls when you want temporary in-world feedback.
-
-## Status Colors
-
-- Active: the provider or related craft request is progressing.
-- Slow: the request has taken longer than the configured slow threshold.
-- Blocked: the request has exceeded the blocked threshold, the provider is locked, or the tracker detects a hard delivery problem.
-
-For machine-based crafting, a provider may remain idle while the adjacent machine processes the input. The tracker checks common machine state properties such as `active`, `lit`, `working`, `running`, `crafting`, and `processing` to avoid keeping a recovered craft marked as blocked.
-
-## Recipe
-
-```
-PEP
-ENE
-PEP
-```
-
-- `P`: AE2 Calculation Processor
-- `E`: Ender Eye
-- `N`: AE2 Network Tool
-
-## Commands
+## 指令
 
 - `/crafttracker toggle`
 - `/crafttracker on`
 - `/crafttracker off`
 - `/crafttracker status`
 
-## Dependencies
-
-- Minecraft 1.21.1
-- NeoForge 21.1+
-- Applied Energistics 2
-- EMI is optional, but recommended for locator filter workflows.
-
-## Build
-
-```bash
-./gradlew build
-```
-
-On Windows:
-
-```bat
-gradlew.bat build
-```
-
-Java 21 is required.
-
-## Diagnostics
-
-Enable `diagnostics.debugTracking` in the config to write detailed provider state transitions to the log. Useful phases include:
-
-- `quick.create_tentative`
-- `refresh.tentative_promote`
-- `refresh.idle_cpu_busy`
-- `refresh.stuck_clear_adjacent_active`
-- `refresh.recover_busy`
-- `entry.remove_missed`
-
-Diagnostics are disabled by default and are intended for testing or bug reports.
-
-## License
+## 许可证
 
 GNU LGPL 3.0
 
-### Asset Credits
+### 资源说明
 
-The Network Locator item texture is based on AE2's `network_tool` texture. Copyright belongs to Applied Energistics 2.
+网络定位器物品贴图基于 AE2 的 `network_tool` 贴图制作，版权归 Applied Energistics 2 所有。

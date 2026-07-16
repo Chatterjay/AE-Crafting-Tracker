@@ -1,59 +1,57 @@
-# Changelog
-
-[Chinese](CHANGELOG_ZH.md)
+# 更新日志
 
 ## [Unreleased] - 2026-07-16
 
-### Added
+### 新增
 
-- Added a refreshed mod icon and wired it through `neoforge.mods.toml`.
-- Added shape-aware provider outlines that render only the outer visible block shape.
-- Added floating status badges with compact localized text and separated output icon previews.
-- Added hex RGB color configuration under `appearance.colors`.
-- Added grouped opacity settings under `appearance.opacity`.
-- Added diagnostics configuration for detailed provider tracking logs.
-- Added independent locator tracking service for drop detection, network switching, and runtime highlight state.
-- Added EMI drag-hover feedback and ghost-slot updates for Network Locator filter slots.
-- Added adjacent machine activity detection for machine workflows where the provider is idle while the machine is processing.
+- 新增模组图标，并在 `neoforge.mods.toml` 中启用。
+- 新增按方块实际可见形状绘制的供应器外轮廓，只显示外边框。
+- 新增悬浮状态牌，使用更精简的本地化文本，并与输出图标分离显示。
+- 新增 `appearance.colors` 下的十六进制 RGB 颜色配置。
+- 新增 `appearance.opacity` 下的透明度配置分组。
+- 新增 `diagnostics` 诊断配置，可输出详细供应器追踪日志。
+- 新增独立的定位器追踪服务，用于处理丢弃检测、网络切换和运行时高亮状态。
+- 新增 Network Locator 过滤槽的 EMI 拖拽悬停反馈和幽灵槽位更新。
+- 新增相邻机器活动检测，用于供应器空闲但机器正在加工的合成流程。
 
-### Changed
+### 变更
 
-- Reworked provider tracking into clearer refresh, quick scan, full scan, and send phases.
-- Provider highlighting is no longer enabled by default through config; runtime controls are used for temporary highlighting.
-- Refined active, slow, and blocked status timing so recovered machine crafts do not stay blocked.
-- Refined Network Locator screen behavior and virtual filter slot handling.
-- Reworked configuration layout into `status`, `scan`, `appearance`, and `diagnostics`.
-- Updated English and Chinese localization for configuration groups and overlay text.
-- Updated mod description to match the new rendering and locator behavior.
+- 重构供应器追踪逻辑，拆分为刷新、快速探查、完整扫描和发送阶段。
+- 供应器高亮不再通过配置默认启用，改为使用运行时控制临时开启。
+- 优化制作中、变慢、阻塞的计时逻辑，避免机器恢复后继续保持阻塞。
+- 优化 Network Locator 界面行为和虚拟过滤槽逻辑。
+- 重构配置结构为 `status`、`scan`、`appearance`、`diagnostics`。
+- 更新英文和中文的配置分组、覆盖层文本本地化。
+- 更新模组描述，使其匹配新的渲染和定位器行为。
 
-### Fixed
+### 修复
 
-- Fixed output icons overlapping floating status badges.
-- Fixed overly thick outlines drawing internal lines for layered block shapes.
-- Fixed provider highlights flickering or disappearing while AE CPU requests were still active.
-- Fixed tentative provider entries being repeatedly cleared and recreated.
-- Fixed blocked machine crafts staying blocked after an adjacent machine resumed processing.
-- Fixed missing configuration screen localization keys.
+- 修复输出物品图标与悬浮状态牌重叠。
+- 修复粗轮廓在多层方块形状内部也显示线条的问题。
+- 修复 AE CPU 请求仍存在时供应器高亮闪烁或消失的问题。
+- 修复临时供应器条目反复清除又重建的问题。
+- 修复机器恢复运行后仍被旧计时判定为阻塞的问题。
+- 修复配置界面缺失本地化键的问题。
 
 ## [0.1.0] - 2025-07-01
 
-### Added
+### 新增
 
-- Network Locator item for scanning AE networks to find blocks matching filter items.
-- Locator GUI with 9 filter slots and EMI drag-and-drop support.
-- Runtime highlight mode with a toggle button in the locator screen.
-- Crafting recipe for Network Locator.
-- `/crafttracker` command with `toggle`, `on`, `off`, and `status`.
+- 新增网络定位器物品，可扫描 AE 网络并查找匹配过滤物品的方块。
+- 新增带 9 个过滤槽的定位器界面，并支持 EMI 拖拽。
+- 新增定位器界面中的运行时高亮开关。
+- 新增网络定位器合成配方。
+- 新增 `/crafttracker` 指令，包含 `toggle`、`on`、`off`、`status`。
 
-### Fixed
+### 修复
 
-- Drop detection now clears highlights immediately when the locator is dropped.
-- Network switch detection now clears old highlights and scans the new network immediately.
-- Locator scans work independently of the general highlight config toggle.
-- Dropping the locator no longer permanently disables player highlights.
-- Recipe type corrected from `minecraft:shaped` to `minecraft:crafting_shaped`.
+- 丢弃定位器时会立即清除高亮。
+- 切换绑定网络时会清除旧高亮并立即扫描新网络。
+- 定位器扫描独立于普通高亮配置开关。
+- 丢弃定位器不再永久禁用玩家高亮。
+- 合成配方类型从 `minecraft:shaped` 修正为 `minecraft:crafting_shaped`。
 
-### Changed
+### 变更
 
-- Default highlight config changed to `false`.
-- Removed production debug logging from the initial locator implementation.
+- 默认高亮配置改为 `false`。
+- 移除初始定位器实现中的生产环境调试日志。
