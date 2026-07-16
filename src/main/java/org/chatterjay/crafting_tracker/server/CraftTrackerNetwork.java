@@ -53,9 +53,7 @@ public class CraftTrackerNetwork {
                     context.enqueueWork(() -> {
                         var player = context.player();
                         if (player != null && player.containerMenu instanceof NetworkLocatorMenu menu) {
-                            if (data.slotIndex() >= 0 && data.slotIndex() < 9) {
-                                menu.getFilterContainer().setItem(data.slotIndex(), data.stack());
-                            }
+                            menu.updateFilterSlot(data.slotIndex(), data.stack());
                         }
                     });
                 });

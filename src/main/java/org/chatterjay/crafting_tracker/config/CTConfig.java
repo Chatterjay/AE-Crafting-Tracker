@@ -12,8 +12,11 @@ public final class CTConfig {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final ModConfigSpec.Builder BUILDER = new ModConfigSpec.Builder();
 
-    // ---- Highlight ----
-    public static final ModConfigSpec.BooleanValue HIGHLIGHT_ENABLED;
+    private static final String DEFAULT_COLOR_ACTIVE = "#55FF55";
+    private static final String DEFAULT_COLOR_STALLED = "#FFFF55";
+    private static final String DEFAULT_COLOR_STUCK = "#FF5555";
+
+    // ---- Status thresholds ----
     public static final ModConfigSpec.IntValue STALL_THRESHOLD_SECONDS;
     public static final ModConfigSpec.IntValue STUCK_THRESHOLD_SECONDS;
 
@@ -21,87 +24,103 @@ public final class CTConfig {
     public static final ModConfigSpec.IntValue SCAN_INTERVAL_TICKS;
     public static final ModConfigSpec.IntValue SCAN_RADIUS;
 
-    // ---- Colors ----
-    public static final ModConfigSpec.IntValue COLOR_ACTIVE;
-    public static final ModConfigSpec.IntValue COLOR_STALLED;
-    public static final ModConfigSpec.IntValue COLOR_STUCK;
+    // ---- Appearance: colors ----
+    public static final ModConfigSpec.ConfigValue<String> COLOR_ACTIVE;
+    public static final ModConfigSpec.ConfigValue<String> COLOR_STALLED;
+    public static final ModConfigSpec.ConfigValue<String> COLOR_STUCK;
 
-    // ---- Opacity ----
-    public static final ModConfigSpec.IntValue FILL_ALPHA_INNER;
-    public static final ModConfigSpec.IntValue FILL_ALPHA_OUTER;
+    // ---- Appearance: opacity ----
+    public static final ModConfigSpec.IntValue BADGE_BACKGROUND_ALPHA;
+    public static final ModConfigSpec.IntValue BADGE_ACCENT_ALPHA;
     public static final ModConfigSpec.IntValue OUTLINE_ALPHA;
 
-    static {
-        BUILDER.push("highlight");
+    // ---- Diagnostics ----
+    public static final ModConfigSpec.BooleanValue DEBUG_TRACKING;
+    public static final ModConfigSpec.IntValue DEBUG_LOG_INTERVAL_TICKS;
 
-        HIGHLIGHT_ENABLED = BUILDER
-                .comment("Whether crafting highlight is enabled by default for all players")
-                .translation(Crafting_tracker.MODID + ".config.highlight.enabled")
-                .define("enabled", false);
+    static {
+        BUILDER.push("status");
 
         STALL_THRESHOLD_SECONDS = BUILDER
-                .comment("Seconds before a busy provider transitions from ACTIVE (green) to STALLED (yellow)")
-                .translation(Crafting_tracker.MODID + ".config.highlight.stallThresholdSeconds")
+                .comment("Seconds before a busy provider transitions from active to slow.")
+                .translation(Crafting_tracker.MODID + ".config.status.stallThresholdSeconds")
                 .defineInRange("stallThresholdSeconds", 5, 1, 60);
 
         STUCK_THRESHOLD_SECONDS = BUILDER
-                .comment("Seconds before a stalled provider transitions to STUCK (red)")
-                .translation(Crafting_tracker.MODID + ".config.highlight.stuckThresholdSeconds")
+                .comment("Seconds before a slow provider transitions to blocked.")
+                .translation(Crafting_tracker.MODID + ".config.status.stuckThresholdSeconds")
                 .defineInRange("stuckThresholdSeconds", 15, 5, 120);
 
         BUILDER.pop();
         BUILDER.push("scan");
 
         SCAN_INTERVAL_TICKS = BUILDER
-                .comment("Ticks between provider scans (20 = 1 second)")
+                .comment("Ticks between full provider scans (20 = 1 second).")
                 .translation(Crafting_tracker.MODID + ".config.scan.scanIntervalTicks")
                 .defineInRange("scanIntervalTicks", 20, 5, 100);
 
         SCAN_RADIUS = BUILDER
-                .comment("Radius in blocks to scan for pattern providers")
+                .comment("Radius in blocks to scan for pattern providers.")
                 .translation(Crafting_tracker.MODID + ".config.scan.scanRadius")
                 .defineInRange("scanRadius", 64, 16, 256);
 
         BUILDER.pop();
+        BUILDER.push("appearance");
         BUILDER.push("colors");
 
         COLOR_ACTIVE = BUILDER
-                .comment("Highlight color for ACTIVE providers (RGB hex as decimal, e.g. 5635925 = 0x55FF55)")
-                .translation(Crafting_tracker.MODID + ".config.colors.colorActive")
-                .defineInRange("colorActive", 0x55FF55, 0x000000, 0xFFFFFF);
+                .comment("Hex RGB color for active providers. Use #RRGGBB or 0xRRGGBB.")
+                .translation(Crafting_tracker.MODID + ".config.appearance.colors.active")
+                .define("active", DEFAULT_COLOR_ACTIVE, CTConfig::isColorValue);
 
         COLOR_STALLED = BUILDER
-                .comment("Highlight color for STALLED providers")
-                .translation(Crafting_tracker.MODID + ".config.colors.colorStalled")
-                .defineInRange("colorStalled", 0xFFFF55, 0x000000, 0xFFFFFF);
+                .comment("Hex RGB color for slow providers. Use #RRGGBB or 0xRRGGBB.")
+                .translation(Crafting_tracker.MODID + ".config.appearance.colors.stalled")
+                .define("stalled", DEFAULT_COLOR_STALLED, CTConfig::isColorValue);
 
         COLOR_STUCK = BUILDER
-                .comment("Highlight color for STUCK providers")
-                .translation(Crafting_tracker.MODID + ".config.colors.colorStuck")
-                .defineInRange("colorStuck", 0xFF5555, 0x000000, 0xFFFFFF);
+                .comment("Hex RGB color for blocked providers. Use #RRGGBB or 0xRRGGBB.")
+                .translation(Crafting_tracker.MODID + ".config.appearance.colors.stuck")
+                .define("stuck", DEFAULT_COLOR_STUCK, CTConfig::isColorValue);
 
-        FILL_ALPHA_INNER = BUILDER
-                .comment("Opacity for inner highlight fill (0=transparent, 255=solid)")
-                .translation(Crafting_tracker.MODID + ".config.colors.fillAlphaInner")
-                .defineInRange("fillAlphaInner", 30, 0, 255);
+        BUILDER.pop();
+        BUILDER.push("opacity");
 
-        FILL_ALPHA_OUTER = BUILDER
-                .comment("Opacity for outer highlight glow (0=transparent, 255=solid)")
-                .translation(Crafting_tracker.MODID + ".config.colors.fillAlphaOuter")
-                .defineInRange("fillAlphaOuter", 80, 0, 255);
+        BADGE_BACKGROUND_ALPHA = BUILDER
+                .comment("Opacity for the floating status badge background (0=transparent, 255=solid).")
+                .translation(Crafting_tracker.MODID + ".config.appearance.opacity.badgeBackground")
+                .defineInRange("badgeBackground", 30, 0, 255);
+
+        BADGE_ACCENT_ALPHA = BUILDER
+                .comment("Opacity for the floating status badge accent strip (0=transparent, 255=solid).")
+                .translation(Crafting_tracker.MODID + ".config.appearance.opacity.badgeAccent")
+                .defineInRange("badgeAccent", 80, 0, 255);
 
         OUTLINE_ALPHA = BUILDER
-                .comment("Opacity for highlight outline (0=transparent, 255=solid)")
-                .translation(Crafting_tracker.MODID + ".config.colors.outlineAlpha")
-                .defineInRange("outlineAlpha", 255, 0, 255);
+                .comment("Opacity for the shape-aware highlight outline (0=transparent, 255=solid).")
+                .translation(Crafting_tracker.MODID + ".config.appearance.opacity.outline")
+                .defineInRange("outline", 255, 0, 255);
+
+        BUILDER.pop();
+        BUILDER.pop();
+
+        BUILDER.push("diagnostics");
+
+        DEBUG_TRACKING = BUILDER
+                .comment("Log detailed provider tracking state for diagnosing flicker or missing status updates.")
+                .translation(Crafting_tracker.MODID + ".config.diagnostics.debugTracking")
+                .define("debugTracking", false);
+
+        DEBUG_LOG_INTERVAL_TICKS = BUILDER
+                .comment("Minimum ticks between repeated tracking debug logs for the same provider.")
+                .translation(Crafting_tracker.MODID + ".config.diagnostics.debugLogIntervalTicks")
+                .defineInRange("debugLogIntervalTicks", 20, 1, 200);
 
         BUILDER.pop();
     }
 
     public static final ModConfigSpec SPEC = BUILDER.build();
 
-    // Cached values for fast access
-    public static boolean highlightEnabled;
     public static int stallThresholdSeconds;
     public static int stuckThresholdSeconds;
     public static int scanIntervalTicks;
@@ -112,6 +131,8 @@ public final class CTConfig {
     public static int fillAlphaInner;
     public static int fillAlphaOuter;
     public static int outlineAlpha;
+    public static boolean debugTracking;
+    public static int debugLogIntervalTicks;
 
     private CTConfig() {}
 
@@ -128,33 +149,70 @@ public final class CTConfig {
         LOGGER.info("Configuration reloaded");
     }
 
-    /** Re-read all cached values from the ModConfigSpec. */
     private static void refreshCache() {
-        highlightEnabled = HIGHLIGHT_ENABLED.get();
         stallThresholdSeconds = STALL_THRESHOLD_SECONDS.get();
         stuckThresholdSeconds = STUCK_THRESHOLD_SECONDS.get();
         scanIntervalTicks = SCAN_INTERVAL_TICKS.get();
         scanRadius = SCAN_RADIUS.get();
-        colorActive = COLOR_ACTIVE.get();
-        colorStalled = COLOR_STALLED.get();
-        colorStuck = COLOR_STUCK.get();
-        fillAlphaInner = FILL_ALPHA_INNER.get();
-        fillAlphaOuter = FILL_ALPHA_OUTER.get();
+        colorActive = parseColor(COLOR_ACTIVE.get(), DEFAULT_COLOR_ACTIVE, "appearance.colors.active");
+        colorStalled = parseColor(COLOR_STALLED.get(), DEFAULT_COLOR_STALLED, "appearance.colors.stalled");
+        colorStuck = parseColor(COLOR_STUCK.get(), DEFAULT_COLOR_STUCK, "appearance.colors.stuck");
+        fillAlphaInner = BADGE_BACKGROUND_ALPHA.get();
+        fillAlphaOuter = BADGE_ACCENT_ALPHA.get();
         outlineAlpha = OUTLINE_ALPHA.get();
+        debugTracking = DEBUG_TRACKING.get();
+        debugLogIntervalTicks = DEBUG_LOG_INTERVAL_TICKS.get();
     }
 
-    /** Validate config values and log warnings for out-of-range values. */
     public static void validate() {
-        validateInt(STALL_THRESHOLD_SECONDS, "highlight.stallThresholdSeconds", 5, 1, 60);
-        validateInt(STUCK_THRESHOLD_SECONDS, "highlight.stuckThresholdSeconds", 15, 5, 120);
+        validateInt(STALL_THRESHOLD_SECONDS, "status.stallThresholdSeconds", 5, 1, 60);
+        validateInt(STUCK_THRESHOLD_SECONDS, "status.stuckThresholdSeconds", 15, 5, 120);
         validateInt(SCAN_INTERVAL_TICKS, "scan.scanIntervalTicks", 20, 5, 100);
         validateInt(SCAN_RADIUS, "scan.scanRadius", 64, 16, 256);
-        validateInt(COLOR_ACTIVE, "colors.colorActive", 0x55FF55, 0x000000, 0xFFFFFF);
-        validateInt(COLOR_STALLED, "colors.colorStalled", 0xFFFF55, 0x000000, 0xFFFFFF);
-        validateInt(COLOR_STUCK, "colors.colorStuck", 0xFF5555, 0x000000, 0xFFFFFF);
-        validateInt(FILL_ALPHA_INNER, "colors.fillAlphaInner", 30, 0, 255);
-        validateInt(FILL_ALPHA_OUTER, "colors.fillAlphaOuter", 80, 0, 255);
-        validateInt(OUTLINE_ALPHA, "colors.outlineAlpha", 255, 0, 255);
+        validateColor(COLOR_ACTIVE, "appearance.colors.active", DEFAULT_COLOR_ACTIVE);
+        validateColor(COLOR_STALLED, "appearance.colors.stalled", DEFAULT_COLOR_STALLED);
+        validateColor(COLOR_STUCK, "appearance.colors.stuck", DEFAULT_COLOR_STUCK);
+        validateInt(BADGE_BACKGROUND_ALPHA, "appearance.opacity.badgeBackground", 30, 0, 255);
+        validateInt(BADGE_ACCENT_ALPHA, "appearance.opacity.badgeAccent", 80, 0, 255);
+        validateInt(OUTLINE_ALPHA, "appearance.opacity.outline", 255, 0, 255);
+        validateInt(DEBUG_LOG_INTERVAL_TICKS, "diagnostics.debugLogIntervalTicks", 20, 1, 200);
+        refreshCache();
+    }
+
+    private static boolean isColorValue(Object value) {
+        return value instanceof String text && tryParseColor(text) != null;
+    }
+
+    private static void validateColor(ModConfigSpec.ConfigValue<String> value, String path, String fallback) {
+        String text = value.get();
+        if (tryParseColor(text) == null) {
+            LOGGER.warn("[CTConfig] '{}' = '{}' is not a valid hex RGB color, falling back to {}",
+                    path, text, fallback);
+            value.set(fallback);
+        }
+    }
+
+    private static int parseColor(String text, String fallback, String path) {
+        Integer parsed = tryParseColor(text);
+        if (parsed != null) return parsed;
+
+        LOGGER.warn("[CTConfig] '{}' = '{}' is not a valid hex RGB color, using {}",
+                path, text, fallback);
+        return tryParseColor(fallback);
+    }
+
+    private static Integer tryParseColor(String raw) {
+        if (raw == null) return null;
+        String text = raw.trim();
+        if (text.startsWith("#")) {
+            text = text.substring(1);
+        } else if (text.startsWith("0x") || text.startsWith("0X")) {
+            text = text.substring(2);
+        }
+        if (text.length() != 6 || !text.matches("[0-9a-fA-F]{6}")) {
+            return null;
+        }
+        return Integer.parseInt(text, 16);
     }
 
     private static void validateInt(ModConfigSpec.IntValue value, String path, int fallback, int min, int max) {

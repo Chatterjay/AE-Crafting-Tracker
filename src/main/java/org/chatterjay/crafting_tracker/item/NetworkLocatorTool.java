@@ -153,12 +153,17 @@ public class NetworkLocatorTool extends Item {
 
     public static void setFilter(ItemStack stack, int slot, ItemStack filter, RegistryAccess registryAccess) {
         if (slot < 0 || slot >= 9) return;
-        CompoundTag itemTag = (CompoundTag) ItemStack.OPTIONAL_CODEC
-                .encodeStart(registryAccess.createSerializationContext(NbtOps.INSTANCE), filter)
-                .getOrThrow();
         stack.update(DataComponents.CUSTOM_DATA, CustomData.EMPTY, data -> {
             var tag = data.copyTag();
-            tag.put(TAG_FILTER_PREFIX + slot, itemTag);
+            String key = TAG_FILTER_PREFIX + slot;
+            if (filter.isEmpty()) {
+                tag.remove(key);
+            } else {
+                CompoundTag itemTag = (CompoundTag) ItemStack.OPTIONAL_CODEC
+                        .encodeStart(registryAccess.createSerializationContext(NbtOps.INSTANCE), filter.copyWithCount(1))
+                        .getOrThrow();
+                tag.put(key, itemTag);
+            }
             return CustomData.of(tag);
         });
     }
@@ -180,6 +185,14 @@ public class NetworkLocatorTool extends Item {
         for (int i = 0; i < 9; i++) {
             ItemStack f = getFilter(stack, i, registryAccess);
             if (!f.isEmpty()) filters.add(f);
+        }
+        return filters;
+    }
+
+    public static List<ItemStack> getFilterSlots(ItemStack stack, RegistryAccess registryAccess) {
+        List<ItemStack> filters = new ArrayList<>(9);
+        for (int i = 0; i < 9; i++) {
+            filters.add(getFilter(stack, i, registryAccess));
         }
         return filters;
     }
