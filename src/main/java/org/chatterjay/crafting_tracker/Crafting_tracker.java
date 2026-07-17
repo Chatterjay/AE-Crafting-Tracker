@@ -1,17 +1,19 @@
 package org.chatterjay.crafting_tracker;
 
 import com.mojang.logging.LogUtils;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.item.CreativeModeTab;
 import net.minecraft.world.item.Item;
 import net.neoforged.bus.api.IEventBus;
-import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.config.ModConfig;
 import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
@@ -33,10 +35,11 @@ import net.neoforged.fml.loading.FMLEnvironment;
 public class Crafting_tracker {
     public static final String MODID = "crafting_tracker";
     private static final Logger LOGGER = LogUtils.getLogger();
+    private static final ResourceKey<CreativeModeTab> AE2_MAIN_TAB =
+            ResourceKey.create(Registries.CREATIVE_MODE_TAB, ResourceLocation.fromNamespaceAndPath("ae2", "main"));
 
     public static final DeferredRegister.Blocks BLOCKS = DeferredRegister.createBlocks(MODID);
     public static final DeferredRegister.Items ITEMS = DeferredRegister.createItems(MODID);
-    public static final DeferredRegister<CreativeModeTab> CREATIVE_MODE_TABS = DeferredRegister.create(Registries.CREATIVE_MODE_TAB, MODID);
     public static final DeferredRegister<MenuType<?>> MENUS = DeferredRegister.create(Registries.MENU, MODID);
 
     // Items
@@ -47,18 +50,10 @@ public class Crafting_tracker {
     public static final java.util.function.Supplier<MenuType<NetworkLocatorMenu>> NETWORK_LOCATOR_MENU =
             MENUS.register("network_locator", () -> new MenuType<>(NetworkLocatorMenu::new, FeatureFlags.DEFAULT_FLAGS));
 
-    // Creative tab
-    public static final java.util.function.Supplier<CreativeModeTab> CREATIVE_TAB = CREATIVE_MODE_TABS.register("tab",
-            () -> CreativeModeTab.builder()
-                    .icon(() -> NETWORK_LOCATOR.get().getDefaultInstance())
-                    .displayItems((params, output) -> output.accept(NETWORK_LOCATOR.get()))
-                    .build());
-
     public Crafting_tracker(IEventBus modEventBus, ModContainer modContainer) {
         BLOCKS.register(modEventBus);
         ITEMS.register(modEventBus);
         MENUS.register(modEventBus);
-        CREATIVE_MODE_TABS.register(modEventBus);
 
         modContainer.registerConfig(ModConfig.Type.COMMON, CTConfig.SPEC);
 
@@ -76,6 +71,8 @@ public class Crafting_tracker {
 
         modEventBus.addListener(RegisterPayloadHandlersEvent.class,
                 (event) -> CraftTrackerNetwork.register(event));
+        modEventBus.addListener(BuildCreativeModeTabContentsEvent.class,
+                Crafting_tracker::addCreativeTabItems);
 
         // Client-only: register screens
         modEventBus.addListener(net.neoforged.neoforge.client.event.RegisterMenuScreensEvent.class,
@@ -94,6 +91,12 @@ public class Crafting_tracker {
                 }
             });
         });
+    }
+
+    private static void addCreativeTabItems(BuildCreativeModeTabContentsEvent event) {
+        if (AE2_MAIN_TAB.equals(event.getTabKey())) {
+            event.accept(NETWORK_LOCATOR.get());
+        }
     }
 
     /** Client-only: register NeoForge built-in config screen via reflection. */
