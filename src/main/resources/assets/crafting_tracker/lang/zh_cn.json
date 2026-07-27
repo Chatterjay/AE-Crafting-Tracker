@@ -15,7 +15,7 @@
   "msg.crafting_tracker.locator.locked_off": "工具已解锁",
 
   "button.crafting_tracker.runtime_highlight.on": "停止",
-  "button.crafting_tracker.runtime_highlight.off": "运行",
+  "button.crafting_tracker.runtime_highlight.off": "高亮",
 
   "overlay.crafting_tracker.status.active": "制作中",
   "overlay.crafting_tracker.status.stalled": "变慢",
@@ -42,6 +42,9 @@
   "crafting_tracker.configuration.appearance.tooltip": "颜色和透明度",
   "crafting_tracker.configuration.diagnostics.button": "诊断",
   "crafting_tracker.configuration.diagnostics.tooltip": "追踪诊断",
+  "crafting_tracker.configuration.ae_cpu_priority": "AE CPU 优先级",
+  "crafting_tracker.configuration.ae_cpu_priority.button": "AE CPU 优先级",
+  "crafting_tracker.configuration.ae_cpu_priority.tooltip": "实验性的 AE 合成 CPU 运行期优先级控制",
   "crafting_tracker.configuration.section.crafting.tracker.common.toml": "通用",
   "crafting_tracker.configuration.section.crafting.tracker.common.toml.title": "合成追踪",
 
@@ -72,5 +75,16 @@
   "crafting_tracker.config.diagnostics.debugTracking": "追踪诊断",
   "crafting_tracker.config.diagnostics.debugTracking.tooltip": "记录详细供应器状态转换，用于排查闪烁或状态不更新",
   "crafting_tracker.config.diagnostics.debugLogIntervalTicks": "诊断日志间隔（tick）",
-  "crafting_tracker.config.diagnostics.debugLogIntervalTicks.tooltip": "同一供应器重复输出诊断日志的最小 tick 间隔"
+  "crafting_tracker.config.diagnostics.debugLogIntervalTicks.tooltip": "同一供应器重复输出诊断日志的最小 tick 间隔",
+
+  "crafting_tracker.tooltip.ae_cpu_priority.right_click": "右键提升发配优先级",
+  "crafting_tracker.tooltip.ae_cpu_priority.shift_right_click": "Shift+右键降低发配优先级",
+  "crafting_tracker.tooltip.ae_cpu_priority.level": "优先级：%s",
+  "crafting_tracker.message.ae_cpu_priority.promoted_level": "已提升 AE CPU 优先级：%s",
+  "crafting_tracker.message.ae_cpu_priority.lowered_level": "已降低 AE CPU 优先级：%s",
+  "crafting_tracker.message.ae_cpu_priority.cleared": "已清除 AE CPU 优先级",
+  "crafting_tracker.config.ae_cpu_priority.enableAeCpuPriority": "AE CPU 优先级",
+  "crafting_tracker.config.ae_cpu_priority.enableAeCpuPriority.tooltip": "实验功能：右键 AE 合成 CPU 提升发配优先级。需要服务端安装 Crafting Tracker 才能影响合成发配。",
+  "crafting_tracker.config.ae_cpu_priority.aeCpuPriorityNames": "AE CPU 优先名称",
+  "crafting_tracker.config.ae_cpu_priority.aeCpuPriorityNames.tooltip": "用于自动选择 CPU 的合成 CPU 名称。末尾可加 * 做前缀匹配，例如 Main*。"
 }

@@ -1,0 +1,65 @@
+package org.chatterjay.crafting_tracker.mixin;
+
+import appeng.api.crafting.IPatternDetails;
+import appeng.api.networking.crafting.ICraftingCPU;
+import appeng.api.networking.crafting.ICraftingProvider;
+import appeng.api.stacks.KeyCounter;
+import appeng.me.service.CraftingService;
+import appeng.api.networking.energy.IEnergyService;
+import org.chatterjay.crafting_tracker.util.AeCpuPrioritySelector;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Redirect;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+@Mixin(targets = "net.pedroksl.advanced_ae.common.logic.AdvCraftingCPULogic", remap = false)
+public abstract class AdvCraftingCPULogicCpuPriorityMixin {
+    @Inject(method = "finishJob", at = @At("HEAD"))
+    private void craftingtracker$clearRuntimePriorityOnJobFinished(boolean success, CallbackInfo ci) {
+        AeCpuPrioritySelector.clearRuntimeAfterJobFinished(AeCpuPrioritySelector.cpuFromLogic(this));
+    }
+
+    @Inject(method = "tickCraftingLogic", at = @At("HEAD"), cancellable = true)
+    private void craftingtracker$skipLowerPriorityAdvancedCpuTick(
+            IEnergyService energyService,
+            CraftingService craftingService,
+            CallbackInfo ci
+    ) {
+        ICraftingCPU currentCpu = AeCpuPrioritySelector.cpuFromLogic(this);
+        if (currentCpu != null && AeCpuPrioritySelector.shouldDeferCpuTick(currentCpu)) {
+            ci.cancel();
+        }
+    }
+
+    @Redirect(
+            method = "executeCrafting",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lappeng/api/networking/crafting/ICraftingProvider;isBusy()Z"
+            )
+    )
+    private boolean craftingtracker$checkProviderBusyWithCpuPriority(ICraftingProvider provider) {
+        ICraftingCPU currentCpu = AeCpuPrioritySelector.cpuFromLogic(this);
+        return currentCpu == null ? provider.isBusy() : AeCpuPrioritySelector.isProviderBusyForCpu(currentCpu, provider);
+    }
+
+    @Redirect(
+            method = "executeCrafting",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lappeng/api/networking/crafting/ICraftingProvider;pushPattern(Lappeng/api/crafting/IPatternDetails;[Lappeng/api/stacks/KeyCounter;)Z"
+            )
+    )
+    private boolean craftingtracker$pushPatternWithCpuPriority(
+            ICraftingProvider provider,
+            IPatternDetails patternDetails,
+        KeyCounter[] inputHolder
+    ) {
+        ICraftingCPU currentCpu = AeCpuPrioritySelector.cpuFromLogic(this);
+        return currentCpu == null
+                ? provider.pushPattern(patternDetails, inputHolder)
+                : AeCpuPrioritySelector.pushPatternWithPriority(currentCpu, provider, patternDetails, inputHolder);
+    }
+}
+

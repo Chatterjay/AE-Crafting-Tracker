@@ -13,6 +13,8 @@ import org.chatterjay.crafting_tracker.Crafting_tracker;
 import org.chatterjay.crafting_tracker.client.ClientHighlightCache;
 import org.chatterjay.crafting_tracker.client.ClientLocatorCache;
 import org.chatterjay.crafting_tracker.item.NetworkLocatorMenu;
+import org.chatterjay.crafting_tracker.network.payloads.AECpuPrioritySyncPacket;
+import org.chatterjay.crafting_tracker.network.payloads.AEPromoteCpuPriorityPacket;
 import org.chatterjay.crafting_tracker.network.payloads.C2SToggleRuntimeHighlight;
 import org.chatterjay.crafting_tracker.network.payloads.C2SUpdateFilterSlot;
 import org.chatterjay.crafting_tracker.network.payloads.S2CCraftHighlightData;
@@ -44,6 +46,12 @@ public class CraftTrackerNetwork {
                         context.enqueueWork(() -> ClientLocatorCache.INSTANCE.update(data));
                     }
                 });
+
+        // AE crafting CPU runtime priority sync.
+        registrar.playToClient(
+                AECpuPrioritySyncPacket.TYPE,
+                AECpuPrioritySyncPacket.STREAM_CODEC,
+                AECpuPrioritySyncPacket::handle);
 
         // Filter slot updates from client (EMI drag-drop, scroll-wheel clear)
         registrar.playToServer(
@@ -82,5 +90,11 @@ public class CraftTrackerNetwork {
                         }
                     });
                 });
+
+        // AE crafting CPU runtime priority actions from CPU selection lists.
+        registrar.playToServer(
+                AEPromoteCpuPriorityPacket.TYPE,
+                AEPromoteCpuPriorityPacket.STREAM_CODEC,
+                AEPromoteCpuPriorityPacket::handle);
     }
 }

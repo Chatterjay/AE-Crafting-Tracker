@@ -22,6 +22,17 @@ AE Crafting Tracker 是一个用于 Minecraft NeoForge 1.21.1 的 AE2 合成可�
 - 定位器追踪独立于普通供应器高亮配置运行。
 - 丢弃、解绑或切换网络时会立即清除旧高亮。
 
+### 实验性 AE CPU 优先级
+
+此功能从 EmiLink 迁移到 Crafting Tracker，默认开启。`ae_cpu_priority.enableAeCpuPriority` 开启时，在 AE2 合成 CPU 状态列表或 AdvancedAE 量子电脑 CPU 列表中：
+
+- 右键某个 CPU：只提升该 CPU 自己的运行期优先级。
+- Shift+右键某个 CPU：只降低该 CPU 自己的运行期优先级，降到 0 后清除。
+- 当前 CPU 的合成任务结束后，会自动清理该 CPU 的运行期优先级，不会继承到下一次合成。
+- 支持原版 AE2 CPU，也软适配 AdvancedAE 的量子电脑分裂 CPU。
+
+该功能包含客户端界面操作和服务端合成发配调整：客户端负责按钮/提示显示，服务端负责真正影响 AE 的 CPU tick、发配顺序和忙碌供应器让路逻辑。若只在客户端安装，界面不会让服务端合成调度发生变化。
+
 ### 配置
 
 配置已拆分为更清晰的分组：
@@ -31,6 +42,7 @@ AE Crafting Tracker 是一个用于 Minecraft NeoForge 1.21.1 的 AE2 合成可�
 - `appearance.colors`：十六进制 RGB 颜色，例如 `#55FF55`。
 - `appearance.opacity`：状态牌和轮廓透明度。
 - `diagnostics`：可选的追踪诊断日志。
+`ae_cpu_priority`：实验性 AE CPU 运行期优先级，默认开启。
 
 ## 状态颜色
 

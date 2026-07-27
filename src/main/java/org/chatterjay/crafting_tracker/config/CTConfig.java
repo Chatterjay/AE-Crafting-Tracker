@@ -1,5 +1,7 @@
 package org.chatterjay.crafting_tracker.config;
 
+import java.util.List;
+
 import net.neoforged.fml.event.config.ModConfigEvent;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
@@ -37,6 +39,10 @@ public final class CTConfig {
     // ---- Diagnostics ----
     public static final ModConfigSpec.BooleanValue DEBUG_TRACKING;
     public static final ModConfigSpec.IntValue DEBUG_LOG_INTERVAL_TICKS;
+
+    // ---- AE CPU Priority ----
+    public static final ModConfigSpec.BooleanValue ENABLE_AE_CPU_PRIORITY;
+    public static final ModConfigSpec.ConfigValue<List<? extends String>> AE_CPU_PRIORITY_NAMES;
 
     static {
         BUILDER.push("status");
@@ -117,6 +123,19 @@ public final class CTConfig {
                 .defineInRange("debugLogIntervalTicks", 20, 1, 200);
 
         BUILDER.pop();
+        BUILDER.push("ae_cpu_priority");
+
+        ENABLE_AE_CPU_PRIORITY = BUILDER
+                .comment("Experimental: enable AE crafting CPU runtime priority controls. Requires Crafting Tracker on the server to affect dispatch.")
+                .translation(Crafting_tracker.MODID + ".config.ae_cpu_priority.enableAeCpuPriority")
+                .define("enableAeCpuPriority", true);
+
+        AE_CPU_PRIORITY_NAMES = BUILDER
+                .comment("AE crafting CPU names in automatic selection priority order. Empty entries are ignored. Use a trailing * for prefix matching.")
+                .translation(Crafting_tracker.MODID + ".config.ae_cpu_priority.aeCpuPriorityNames")
+                .defineListAllowEmpty("aeCpuPriorityNames", List.of(), value -> value instanceof String);
+
+        BUILDER.pop();
     }
 
     public static final ModConfigSpec SPEC = BUILDER.build();
@@ -133,6 +152,7 @@ public final class CTConfig {
     public static int outlineAlpha;
     public static boolean debugTracking;
     public static int debugLogIntervalTicks;
+    public static boolean enableAeCpuPriority;
 
     private CTConfig() {}
 
@@ -162,6 +182,7 @@ public final class CTConfig {
         outlineAlpha = OUTLINE_ALPHA.get();
         debugTracking = DEBUG_TRACKING.get();
         debugLogIntervalTicks = DEBUG_LOG_INTERVAL_TICKS.get();
+        enableAeCpuPriority = ENABLE_AE_CPU_PRIORITY.get();
     }
 
     public static void validate() {
