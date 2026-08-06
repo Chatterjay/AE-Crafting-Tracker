@@ -19,7 +19,9 @@ public class MixinConditionalPlugin implements IMixinConfigPlugin {
     @Override
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
         if (targetClassName.startsWith("appeng.")
-                || targetClassName.startsWith("net.pedroksl.advanced_ae.")) {
+                || targetClassName.startsWith("net.pedroksl.advanced_ae.")
+                || targetClassName.startsWith("com.fish_dan_.data_energistics.")
+                || targetClassName.startsWith("cn.dancingsnow.neoecoae.")) {
             String resource = targetClassName.replace('.', '/') + ".class";
             return getClass().getClassLoader().getResource(resource) != null;
         }

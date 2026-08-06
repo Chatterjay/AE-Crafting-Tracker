@@ -10,7 +10,9 @@
     "CraftingCpuLogicCpuPriorityMixin",
     "CraftingServiceCpuPriorityMixin",
     "CraftingStatusMenuCpuPriorityMixin",
-    "QuantumComputerMenuCpuPriorityMixin"
+    "ECOCraftingCPULogicCpuPriorityMixin",
+    "QuantumComputerMenuCpuPriorityMixin",
+    "TrinityDataCoreCpuLogicCpuPriorityMixin"
   ],
   "client": [
     "AdvCpuSelectionListMixin",

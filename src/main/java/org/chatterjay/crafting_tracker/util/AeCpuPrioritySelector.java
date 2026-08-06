@@ -26,6 +26,7 @@ import java.util.WeakHashMap;
 public final class AeCpuPrioritySelector {
     private static final String ADVANCED_AE_CPU_CLASS = "net.pedroksl.advanced_ae.common.cluster.AdvCraftingCPU";
     private static final String ADVANCED_AE_PENDING_KEY_PREFIX = "advanced_ae:pending:";
+    private static final String NEO_ECO_CPU_CLASS = "cn.dancingsnow.neoecoae.api.me.ECOCraftingCPU";
     private static final long PROVIDER_RESERVATION_TICKS = 100;
     private static final long PROVIDER_DEFER_LOG_TICKS = 40;
     private static final long CPU_DEFER_LOG_TICKS = 40;
@@ -360,6 +361,10 @@ public final class AeCpuPrioritySelector {
         if (cpu instanceof CraftingCPUCluster) {
             return true;
         }
+        if (findMethod(cpu.getClass(), "setJobSuspended", boolean.class) != null
+                && findMethod(cpu.getClass(), "isJobSuspended") != null) {
+            return true;
+        }
         Object logic = getCraftingLogic(cpu);
         return logic != null && findMethod(logic.getClass(), "setJobSuspended", boolean.class) != null
                 && findMethod(logic.getClass(), "isJobSuspended") != null;
@@ -368,6 +373,15 @@ public final class AeCpuPrioritySelector {
     private static boolean isJobSuspended(ICraftingCPU cpu) {
         if (cpu instanceof CraftingCPUCluster cluster) {
             return cluster.craftingLogic.isJobSuspended();
+        }
+        try {
+            var method = findMethod(cpu.getClass(), "isJobSuspended");
+            if (method != null) {
+                return (boolean) method.invoke(cpu);
+            }
+        } catch (ReflectiveOperationException | ClassCastException exception) {
+            ModLogger.debug("Failed to read AE crafting CPU suspend state from {}", cpu.getClass().getName());
+            return false;
         }
         Object logic = getCraftingLogic(cpu);
         if (logic == null) {
@@ -387,6 +401,17 @@ public final class AeCpuPrioritySelector {
         if (cpu instanceof CraftingCPUCluster cluster) {
             cluster.craftingLogic.setJobSuspended(suspended);
             return true;
+        }
+        try {
+            var method = findMethod(cpu.getClass(), "setJobSuspended", boolean.class);
+            if (method != null) {
+                method.invoke(cpu, suspended);
+                return true;
+            }
+        } catch (ReflectiveOperationException exception) {
+            ModLogger.debug("Failed to set AE crafting CPU suspend state on {} directly: {}",
+                    cpu.getClass().getName(), exception.toString());
+            return false;
         }
         Object logic = getCraftingLogic(cpu);
         if (logic == null) {
@@ -410,12 +435,20 @@ public final class AeCpuPrioritySelector {
 
     @Nullable
     private static Object getCraftingLogic(ICraftingCPU cpu) {
-        try {
-            var field = findField(cpu.getClass(), "craftingLogic");
-            return field == null ? null : field.get(cpu);
-        } catch (ReflectiveOperationException exception) {
-            return null;
+        for (String fieldName : new String[]{"craftingLogic", "logic"}) {
+            try {
+                var field = findField(cpu.getClass(), fieldName);
+                if (field != null) {
+                    Object logic = field.get(cpu);
+                    if (logic != null) {
+                        return logic;
+                    }
+                }
+            } catch (ReflectiveOperationException exception) {
+                // Try the alternate field name used by optional CPU implementations.
+            }
         }
+        return null;
     }
 
     @Nullable
@@ -669,10 +702,20 @@ public final class AeCpuPrioritySelector {
     }
 
     private static String displayName(ICraftingCPU cpu) {
-        return cpu.getName() == null ? "<unnamed>" : cpu.getName().getString();
+        if (cpu.getName() != null) {
+            return cpu.getName().getString();
+        }
+        if (cpu.getClass().getName().equals(NEO_ECO_CPU_CLASS)) {
+            return "ECO CPU [" + stableCpuKey(cpu) + "]";
+        }
+        return "<unnamed>";
     }
 
     private static String stableCpuKey(ICraftingCPU cpu) {
+        String dispatchIdentity = invokeStringMethod(cpu, "getStableDispatchIdentity");
+        if (dispatchIdentity != null && !dispatchIdentity.isBlank()) {
+            return "dispatch:" + dispatchIdentity;
+        }
         if (cpu.getClass().getName().equals(ADVANCED_AE_CPU_CLASS)) {
             Object uniqueId = readFieldValue(cpu, "uniqueId");
             if (uniqueId != null) {
@@ -683,11 +726,49 @@ public final class AeCpuPrioritySelector {
                 return pendingKey;
             }
         }
+        if (cpu.getClass().getName().equals(NEO_ECO_CPU_CLASS)) {
+            String ecoKey = neoEcoCpuKey(cpu);
+            if (ecoKey != null) {
+                return ecoKey;
+            }
+        }
         Object uniqueId = readFieldValue(cpu, "uniqueId");
         if (uniqueId != null) {
             return cpu.getClass().getName() + "#" + uniqueId;
         }
         return cpu.getClass().getName() + "@" + System.identityHashCode(cpu);
+    }
+
+    @Nullable
+    private static String neoEcoCpuKey(ICraftingCPU cpu) {
+        Object owner = readFieldValue(cpu, "owner");
+        if (owner == null) {
+            return null;
+        }
+
+        int slot = -1;
+        Object cpuArray = readFieldValue(owner, "cpus");
+        if (cpuArray instanceof Object[] cpus) {
+            for (int index = 0; index < cpus.length; index++) {
+                if (cpus[index] == cpu) {
+                    slot = index;
+                    break;
+                }
+            }
+        }
+
+        return "neoecoae:threading-core@" + System.identityHashCode(owner) + "#" + slot;
+    }
+
+    @Nullable
+    private static String invokeStringMethod(Object object, String methodName) {
+        try {
+            var method = findMethod(object.getClass(), methodName);
+            Object value = method == null ? null : method.invoke(object);
+            return value instanceof String string ? string : null;
+        } catch (ReflectiveOperationException exception) {
+            return null;
+        }
     }
 
     @Nullable
@@ -747,6 +828,9 @@ public final class AeCpuPrioritySelector {
         }
         try {
             var method = findMethod(cpu.getClass(), "getGrid");
+            if (method == null) {
+                method = findMethod(cpu.getClass(), "grid");
+            }
             Object grid = method == null ? null : method.invoke(cpu);
             return grid instanceof IGrid iGrid ? iGrid : null;
         } catch (ReflectiveOperationException exception) {
