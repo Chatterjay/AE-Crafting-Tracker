@@ -6,6 +6,7 @@ import appeng.api.networking.crafting.ICraftingProvider;
 import appeng.api.networking.energy.IEnergyService;
 import appeng.api.stacks.KeyCounter;
 import appeng.me.service.CraftingService;
+import org.chatterjay.crafting_tracker.server.CraftTracker;
 import org.chatterjay.crafting_tracker.util.AeCpuPrioritySelector;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -60,8 +61,12 @@ public abstract class ECOCraftingCPULogicCpuPriorityMixin {
             KeyCounter[] inputHolder
     ) {
         ICraftingCPU currentCpu = AeCpuPrioritySelector.cpuFromLogic(this);
-        return currentCpu == null
+        boolean pushed = currentCpu == null
                 ? provider.pushPattern(patternDetails, inputHolder)
                 : AeCpuPrioritySelector.pushPatternWithPriority(currentCpu, provider, patternDetails, inputHolder);
+        if (pushed) {
+            CraftTracker.recordProviderPatternPush(provider, patternDetails);
+        }
+        return pushed;
     }
 }

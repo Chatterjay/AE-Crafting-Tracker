@@ -255,8 +255,16 @@ public class CraftHighlightRenderer {
                                             Camera camera, HighlightEntry entry) {
         int color = getProviderColor(entry.statusOrdinal());
         String line1 = statusLabel(entry.statusOrdinal());
-        int outputs = entry.outputs() == null ? 0 : entry.outputs().size();
-        String line2 = Component.translatable("overlay.crafting_tracker.outputs", outputs).getString();
+        String line2;
+        if (entry.currentCraftingId() != null) {
+            line2 = Component.translatable(
+                    "overlay.crafting_tracker.current_id",
+                    entry.currentCraftingId()
+            ).getString();
+        } else {
+            int outputs = entry.outputs() == null ? 0 : entry.outputs().size();
+            line2 = Component.translatable("overlay.crafting_tracker.outputs", outputs).getString();
+        }
         renderBadge(mc, poseStack, font, bufferSource, camera, entry.pos(),
                 line1, line2, color, providerOutlineAlpha(entry.statusOrdinal()));
     }

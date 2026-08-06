@@ -5,6 +5,7 @@ import appeng.api.networking.crafting.ICraftingProvider;
 import appeng.api.stacks.KeyCounter;
 import appeng.crafting.execution.CraftingCpuLogic;
 import appeng.me.cluster.implementations.CraftingCPUCluster;
+import org.chatterjay.crafting_tracker.server.CraftTracker;
 import org.chatterjay.crafting_tracker.util.AeCpuPrioritySelector;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -50,7 +51,11 @@ public abstract class CraftingCpuLogicCpuPriorityMixin {
             IPatternDetails patternDetails,
             KeyCounter[] inputHolder
     ) {
-        return AeCpuPrioritySelector.pushPatternWithPriority(cluster, provider, patternDetails, inputHolder);
+        boolean pushed = AeCpuPrioritySelector.pushPatternWithPriority(cluster, provider, patternDetails, inputHolder);
+        if (pushed) {
+            CraftTracker.recordProviderPatternPush(provider, patternDetails);
+        }
+        return pushed;
     }
 }
 

@@ -21,7 +21,12 @@ public record S2CCraftHighlightData(List<HighlightEntry> entries, int runtimeRem
     public static final StreamCodec<FriendlyByteBuf, S2CCraftHighlightData> STREAM_CODEC =
             StreamCodec.ofMember(S2CCraftHighlightData::write, S2CCraftHighlightData::new);
 
-    public record HighlightEntry(BlockPos pos, int statusOrdinal, List<OutputItem> outputs) {
+    public record HighlightEntry(
+            BlockPos pos,
+            int statusOrdinal,
+            List<OutputItem> outputs,
+            @Nullable ResourceLocation currentCraftingId
+    ) {
         public record OutputItem(ResourceLocation itemId, int outputType) {}
     }
 
@@ -41,6 +46,11 @@ public record S2CCraftHighlightData(List<HighlightEntry> entries, int runtimeRem
                     buf.writeResourceLocation(out.itemId());
                     buf.writeVarInt(out.outputType());
                 }
+            }
+            ResourceLocation currentCraftingId = entry.currentCraftingId();
+            buf.writeBoolean(currentCraftingId != null);
+            if (currentCraftingId != null) {
+                buf.writeResourceLocation(currentCraftingId);
             }
         }
         buf.writeVarInt(runtimeRemainingTicks);
@@ -64,7 +74,8 @@ public record S2CCraftHighlightData(List<HighlightEntry> entries, int runtimeRem
             } else {
                 outputs = List.of();
             }
-            list.add(new HighlightEntry(pos, ordinal, outputs));
+            ResourceLocation currentCraftingId = buf.readBoolean() ? buf.readResourceLocation() : null;
+            list.add(new HighlightEntry(pos, ordinal, outputs, currentCraftingId));
         }
         return list;
     }

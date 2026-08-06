@@ -8,6 +8,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
 
 import javax.annotation.Nullable;
 
@@ -44,6 +45,7 @@ import appeng.api.networking.IGridNode;
 import appeng.api.networking.IInWorldGridNodeHost;
 import appeng.api.networking.crafting.CraftingJobStatus;
 import appeng.api.networking.crafting.ICraftingCPU;
+import appeng.api.networking.crafting.ICraftingProvider;
 import appeng.api.networking.crafting.ICraftingService;
 import appeng.helpers.patternprovider.PatternProviderLogicHost;
 
@@ -68,6 +70,8 @@ public class CraftTracker {
     private static final Map<BlockPos, TrackerEntry> entries = new HashMap<>();
     private static final Map<BlockPos, Boolean> prevProviderBusy = new HashMap<>();
     private static final Map<BlockPos, Long> debugLastLogMs = new HashMap<>();
+    private static final Map<ICraftingProvider, ResourceLocation> currentProviderCrafts =
+            java.util.Collections.synchronizedMap(new WeakHashMap<>());
     private static final LocatorTrackingService locatorTracking = new LocatorTrackingService();
     private static int scanCounter;
 
@@ -109,6 +113,19 @@ public class CraftTracker {
         if (be instanceof TileAssemblerMatrixPattern matrix) return matrix.getAvailablePatterns();
         if (be instanceof AdvPatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
         return List.of();
+    }
+
+    @Nullable
+    private static ICraftingProvider getCraftingProvider(BlockEntity be) {
+        Object candidate = null;
+        if (be instanceof PatternProviderLogicHost host) {
+            candidate = host.getLogic();
+        } else if (be instanceof TileAssemblerMatrixPattern matrix) {
+            candidate = matrix;
+        } else if (be instanceof AdvPatternProviderLogicHost host) {
+            candidate = host.getLogic();
+        }
+        return candidate instanceof ICraftingProvider provider ? provider : null;
     }
 
     @Nullable
@@ -167,6 +184,17 @@ public class CraftTracker {
     public static int getRuntimeRemainingTicks(UUID playerId, long gameTime) {
         Long expiry = runtimeHighlightExpiry.get(playerId);
         return expiry != null ? (int) Math.max(0, expiry - gameTime) : 0;
+    }
+
+    /** Records the output of a pattern that a provider accepted for execution. */
+    public static void recordProviderPatternPush(ICraftingProvider provider, IPatternDetails patternDetails) {
+        if (provider == null || patternDetails == null) {
+            return;
+        }
+        GenericStack output = patternDetails.getPrimaryOutput();
+        if (output != null) {
+            currentProviderCrafts.put(provider, output.what().getId());
+        }
     }
 
     public static void onServerTick(MinecraftServer server) {
@@ -283,7 +311,12 @@ public class CraftTracker {
                                 + " player=" + player.getGameProfile().getName()
                                 + " emptyOutputs=" + emptyOutputs
                                 + " sendWithoutOutputs=" + sendWithoutOutputs);
-                highlightEntries.add(new HighlightEntry(pos, status.ordinal(), packetOutputs));
+                highlightEntries.add(new HighlightEntry(
+                        pos,
+                        status.ordinal(),
+                        packetOutputs,
+                        e.getValue().currentCraftingId
+                ));
             }
 
             int runtimeRemaining = getRuntimeRemainingTicks(player.getUUID(), gameTime);
@@ -703,14 +736,16 @@ public class CraftTracker {
         }
     }
 
-    private static void applyOutputInfo(TrackerEntry entry, @Nullable List<OutputItem> info, long now) {
+    private static void applyOutputInfo(TrackerEntry entry, @Nullable OutputInfo info, long now) {
         if (info == null || info.isEmpty()) {
+            entry.currentCraftingId = null;
             return;
         }
-        if (!samePrimaryOutput(entry.outputs, info) || entry.activeStartMs == 0) {
+        if (!samePrimaryOutput(entry.outputs, info.outputs()) || entry.activeStartMs == 0) {
             entry.activeStartMs = now;
         }
-        entry.outputs = List.copyOf(info);
+        entry.outputs = List.copyOf(info.outputs());
+        entry.currentCraftingId = info.currentCraftingId();
         entry.lastOutputSeenMs = now;
     }
 
@@ -723,6 +758,7 @@ public class CraftTracker {
                     "lastOutputAgeMs=" + (entry.lastOutputSeenMs == 0 ? -1 : now - entry.lastOutputSeenMs));
         }
         entry.outputs = null;
+        entry.currentCraftingId = null;
         entry.activeStartMs = 0;
         entry.lastOutputSeenMs = 0;
     }
@@ -811,7 +847,11 @@ public class CraftTracker {
         return summary.toString();
     }
 
-    private static @Nullable List<OutputItem> getOutputInfo(BlockEntity be, @Nullable List<OutputItem> prevOutputs) {
+    private static String outputSummary(@Nullable OutputInfo info) {
+        return outputSummary(info == null ? null : info.outputs());
+    }
+
+    private static @Nullable OutputInfo getOutputInfo(BlockEntity be, @Nullable List<OutputItem> prevOutputs) {
         try {
             IGrid grid = getGrid(be);
             if (grid == null) return null;
@@ -837,7 +877,16 @@ public class CraftTracker {
                     }
                 }
             }
-            return results.isEmpty() ? null : results;
+            ResourceLocation currentCraftingId = null;
+            if (isPatternBusy(be)) {
+                ICraftingProvider provider = getCraftingProvider(be);
+                if (provider != null) {
+                    currentCraftingId = currentProviderCrafts.get(provider);
+                }
+            }
+            return results.isEmpty() && currentCraftingId == null
+                    ? null
+                    : new OutputInfo(results, currentCraftingId);
         } catch (Exception e) {
             LOGGER.info("getOutputInfo: exception at {}: {}", be.getBlockPos(), e.getMessage());
         }
@@ -892,9 +941,7 @@ public class CraftTracker {
             for (ICraftingCPU cpu : cs.getCpus()) {
                 if (!cpu.isBusy()) continue;
                 CraftingJobStatus status = cpu.getJobStatus();
-                if (status == null || status.crafting() == null) continue;
-                AEKey cpuKey = status.crafting().what();
-                if (cpuKey.equals(key) || cpuKey.getId().equals(key.getId())) {
+                if (status != null && status.crafting() != null && sameKey(status.crafting().what(), key)) {
                     return true;
                 }
             }
@@ -902,6 +949,10 @@ public class CraftTracker {
             LOGGER.info("isCpuCraftingOutput: exception: {}", e.getMessage());
         }
         return false;
+    }
+
+    private static boolean sameKey(AEKey first, AEKey second) {
+        return first.equals(second) || first.getId().equals(second.getId());
     }
 
     private static CraftStatus computeStatus(TrackerEntry entry, long now) {
@@ -937,9 +988,16 @@ public class CraftTracker {
         boolean tentative;
         boolean stuck;
         @Nullable List<OutputItem> outputs;
+        @Nullable ResourceLocation currentCraftingId;
 
         TrackerEntry(long lockStartMs) {
             this.lockStartMs = lockStartMs;
+        }
+    }
+
+    private record OutputInfo(List<OutputItem> outputs, @Nullable ResourceLocation currentCraftingId) {
+        private boolean isEmpty() {
+            return outputs.isEmpty() && currentCraftingId == null;
         }
     }
 }
