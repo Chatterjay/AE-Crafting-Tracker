@@ -28,6 +28,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
@@ -38,9 +39,6 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 
 import net.neoforged.neoforge.client.extensions.common.IClientFluidTypeExtensions;
 import net.neoforged.neoforge.fluids.FluidStack;
-
-import mekanism.api.MekanismAPI;
-import mekanism.api.chemical.Chemical;
 
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -63,6 +61,10 @@ public class CraftHighlightRenderer {
     private static final int MAX_OUTPUTS = 4;
     private static final int LOCATOR_COLOR = 0x78F7FF;
     private static final int PANEL_COLOR = 0x06080B;
+    private static final ResourceKey<Registry<Object>> CHEMICAL_REGISTRY_KEY =
+            ResourceKey.createRegistryKey(ResourceLocation.fromNamespaceAndPath("mekanism", "chemical"));
+
+    private record ChemicalRenderInfo(ResourceLocation icon, int tint) {}
 
     /** Get the highlight color for a provider status ordinal (reads from config). */
     private static int getProviderColor(int ordinal) {
@@ -531,27 +533,15 @@ public class CraftHighlightRenderer {
                                             PoseStack poseStack, Camera camera,
                                             MultiBufferSource bufferSource, Minecraft mc,
                                             float offsetX, float size) {
-        Registry<Chemical> chemicalRegistry = mc.level.registryAccess().registry(MekanismAPI.CHEMICAL_REGISTRY_NAME).orElse(null);
-        if (chemicalRegistry == null) {
-            ModLogger.debugThrottled("client.icon.chemical_registry", CTConfig.debugLogIntervalTicks,
-                    "Provider chemical icon registry unavailable pos={} id={}", pos, out.itemId());
-            return;
-        }
-        Chemical chemical = chemicalRegistry.get(out.itemId());
+        ChemicalRenderInfo chemical = resolveChemical(mc, out.itemId());
         if (chemical == null) {
             ModLogger.debugThrottled("client.icon.chemical." + out.itemId(), CTConfig.debugLogIntervalTicks,
                     "Provider chemical icon unavailable pos={} id={}", pos, out.itemId());
             return;
         }
-        ResourceLocation icon = chemical.getIcon();
-        if (icon == null) {
-            ModLogger.debugThrottled("client.icon.chemical_texture." + out.itemId(), CTConfig.debugLogIntervalTicks,
-                    "Provider chemical icon texture unavailable pos={} id={}", pos, out.itemId());
-            return;
-        }
-        TextureAtlasSprite sprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(icon);
+        TextureAtlasSprite sprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(chemical.icon());
         VertexConsumer consumer = bufferSource.getBuffer(TINTED_SPRITE_NO_DEPTH);
-        renderTintedSprite(consumer, poseStack, pos, camera, offsetX, size, sprite, chemical.getTint());
+        renderTintedSprite(consumer, poseStack, pos, camera, offsetX, size, sprite, chemical.tint());
     }
 
     private static void renderLocatorItem(BlockPos pos, LocatorHit hit,
@@ -575,28 +565,33 @@ public class CraftHighlightRenderer {
                                               PoseStack poseStack, Camera camera,
                                               MultiBufferSource bufferSource, Minecraft mc,
                                               float offsetX, float size) {
-        if (mc.level == null) return;
-        Registry<Chemical> chemicalRegistry = mc.level.registryAccess().registry(MekanismAPI.CHEMICAL_REGISTRY_NAME).orElse(null);
-        if (chemicalRegistry == null) {
-            ModLogger.debugThrottled("client.icon.locator_chemical_registry", CTConfig.debugLogIntervalTicks,
-                    "Locator chemical icon registry unavailable pos={} id={}", pos, hit.itemId());
-            return;
-        }
-        Chemical chemical = chemicalRegistry.get(hit.itemId());
+        ChemicalRenderInfo chemical = resolveChemical(mc, hit.itemId());
         if (chemical == null) {
             ModLogger.debugThrottled("client.icon.locator_chemical." + hit.itemId(), CTConfig.debugLogIntervalTicks,
                     "Locator chemical icon unavailable pos={} id={}", pos, hit.itemId());
             return;
         }
-        ResourceLocation icon = chemical.getIcon();
-        if (icon == null) {
-            ModLogger.debugThrottled("client.icon.locator_chemical_texture." + hit.itemId(), CTConfig.debugLogIntervalTicks,
-                    "Locator chemical icon texture unavailable pos={} id={}", pos, hit.itemId());
-            return;
-        }
-        TextureAtlasSprite sprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(icon);
+        TextureAtlasSprite sprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(chemical.icon());
         VertexConsumer consumer = bufferSource.getBuffer(TINTED_SPRITE_NO_DEPTH);
-        renderTintedSprite(consumer, poseStack, pos, camera, offsetX, size, sprite, chemical.getTint());
+        renderTintedSprite(consumer, poseStack, pos, camera, offsetX, size, sprite, chemical.tint());
+    }
+
+    private static ChemicalRenderInfo resolveChemical(Minecraft mc, ResourceLocation id) {
+        if (mc.level == null) return null;
+        try {
+            Registry<Object> registry = mc.level.registryAccess().registry(CHEMICAL_REGISTRY_KEY).orElse(null);
+            if (registry == null) return null;
+            Object chemical = registry.get(id);
+            if (chemical == null) return null;
+            Object icon = chemical.getClass().getMethod("getIcon").invoke(chemical);
+            Object tint = chemical.getClass().getMethod("getTint").invoke(chemical);
+            if (icon instanceof ResourceLocation texture && tint instanceof Number color) {
+                return new ChemicalRenderInfo(texture, color.intValue());
+            }
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            // Mekanism is optional and may not expose its chemical registry.
+        }
+        return null;
     }
 
     private static void renderSprite(VertexConsumer consumer, PoseStack poseStack,

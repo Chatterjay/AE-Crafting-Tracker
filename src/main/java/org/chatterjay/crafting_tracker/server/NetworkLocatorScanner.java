@@ -31,10 +31,6 @@ import appeng.parts.automation.ImportBusPart;
 import appeng.parts.automation.StorageLevelEmitterPart;
 import appeng.parts.storagebus.StorageBusPart;
 
-import com.glodblock.github.extendedae.common.tileentities.matrix.TileAssemblerMatrixPattern;
-
-import net.pedroksl.advanced_ae.common.logic.AdvPatternProviderLogicHost;
-
 import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -57,6 +53,10 @@ public class NetworkLocatorScanner {
             "com.fish_dan_.data_energistics.blockentity.TrinityAccessHatchBlockEntity";
     private static final String TRINITY_PATTERN_CORE_CLASS =
             "com.fish_dan_.data_energistics.blockentity.TrinityPatternCoreBlockEntity";
+    private static final String MATRIX_PATTERN_CLASS =
+            "com.glodblock.github.extendedae.common.tileentities.matrix.TileAssemblerMatrixPattern";
+    private static final String ADV_PATTERN_PROVIDER_HOST_CLASS =
+            "net.pedroksl.advanced_ae.common.logic.AdvPatternProviderLogicHost";
     /** Max distinct icon slots per position */
     private static final int MAX_HITS_PER_POS = 3;
 
@@ -232,8 +232,13 @@ public class NetworkLocatorScanner {
 
     private static List<IPatternDetails> getPatterns(Object owner) {
         if (owner instanceof PatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
-        if (owner instanceof TileAssemblerMatrixPattern matrix) return matrix.getAvailablePatterns();
-        if (owner instanceof AdvPatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
+        if (hasType(owner, MATRIX_PATTERN_CLASS)) {
+            return invokePatternList(owner, "getAvailablePatterns");
+        }
+        if (hasType(owner, ADV_PATTERN_PROVIDER_HOST_CLASS)) {
+            Object logic = invokeOptionalNoArg(owner, "getLogic");
+            return logic == null ? List.of() : invokePatternList(logic, "getAvailablePatterns");
+        }
         if (isEcoPatternBus(owner)) {
             return invokePatternList(owner, "getLocalAvailablePatterns");
         }
@@ -257,6 +262,29 @@ public class NetworkLocatorScanner {
 
     private static boolean isTrinityPatternCore(Object owner) {
         return owner != null && owner.getClass().getName().equals(TRINITY_PATTERN_CORE_CLASS);
+    }
+
+    private static boolean hasType(Object value, String className) {
+        return value != null && hasType(value.getClass(), className);
+    }
+
+    private static boolean hasType(Class<?> type, String className) {
+        while (type != null) {
+            if (type.getName().equals(className)) return true;
+            for (Class<?> iface : type.getInterfaces()) {
+                if (hasType(iface, className)) return true;
+            }
+            type = type.getSuperclass();
+        }
+        return false;
+    }
+
+    private static Object invokeOptionalNoArg(Object target, String methodName) {
+        try {
+            return target.getClass().getMethod(methodName).invoke(target);
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            return null;
+        }
     }
 
     private static List<IPatternDetails> invokePatternList(Object owner, String methodName) {

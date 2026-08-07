@@ -57,12 +57,6 @@ import appeng.helpers.externalstorage.GenericStackInv;
 import appeng.helpers.patternprovider.PatternProviderLogicHost;
 import appeng.helpers.patternprovider.PatternProviderReturnInventory;
 
-import com.glodblock.github.extendedae.common.tileentities.matrix.TileAssemblerMatrixPattern;
-
-import me.ramidzkh.mekae2.ae2.MekanismKey;
-
-import net.pedroksl.advanced_ae.common.logic.AdvPatternProviderLogicHost;
-
 public class CraftTracker {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final int MAX_MISSED = 10;
@@ -78,6 +72,11 @@ public class CraftTracker {
             "com.fish_dan_.data_energistics.common.crafting.trinity.execution.cpu.TrinityDataCoreVirtualCpu";
     private static final String TRINITY_PATTERN_CORE_CLASS =
             "com.fish_dan_.data_energistics.blockentity.TrinityPatternCoreBlockEntity";
+    private static final String MATRIX_PATTERN_CLASS =
+            "com.glodblock.github.extendedae.common.tileentities.matrix.TileAssemblerMatrixPattern";
+    private static final String ADV_PATTERN_PROVIDER_HOST_CLASS =
+            "net.pedroksl.advanced_ae.common.logic.AdvPatternProviderLogicHost";
+    private static final String MEKANISM_KEY_CLASS = "me.ramidzkh.mekae2.ae2.MekanismKey";
 
     private static final Set<UUID> enabledPlayers = new HashSet<>();
     private static final Map<UUID, Long> runtimeHighlightExpiry = new HashMap<>();
@@ -127,16 +126,20 @@ public class CraftTracker {
         private static final AdjacentActivity NONE = new AdjacentActivity(false, "none");
     }
 
-    // --- Type abstractions for PatternProviderLogicHost / TileAssemblerMatrixPattern ---
+    // --- Type abstractions for AE2 and optional provider implementations ---
 
     private static boolean isPatternSource(BlockEntity be) {
-        return be instanceof PatternProviderLogicHost || be instanceof TileAssemblerMatrixPattern
-                || be instanceof AdvPatternProviderLogicHost || isEcoPatternBus(be)
+        return be instanceof PatternProviderLogicHost || isMatrixSource(be)
+                || isAdvancedPatternProvider(be) || isEcoPatternBus(be)
                 || isTrinityPatternCore(be);
     }
 
     private static boolean isMatrixSource(BlockEntity be) {
-        return be instanceof TileAssemblerMatrixPattern;
+        return hasType(be, MATRIX_PATTERN_CLASS);
+    }
+
+    private static boolean isAdvancedPatternProvider(BlockEntity be) {
+        return hasType(be, ADV_PATTERN_PROVIDER_HOST_CLASS);
     }
 
     private static boolean isEcoPatternBus(BlockEntity be) {
@@ -167,14 +170,40 @@ public class CraftTracker {
         return Boolean.TRUE.equals(invokeNoArg(target, methodName));
     }
 
+    private static boolean hasType(@Nullable Object value, String className) {
+        return value != null && hasType(value.getClass(), className);
+    }
+
+    private static boolean hasType(Class<?> type, String className) {
+        while (type != null) {
+            if (type.getName().equals(className)) return true;
+            for (Class<?> iface : type.getInterfaces()) {
+                if (hasType(iface, className)) return true;
+            }
+            type = type.getSuperclass();
+        }
+        return false;
+    }
+
+    private static List<IPatternDetails> asPatternList(Object value) {
+        if (!(value instanceof Iterable<?> iterable)) return List.of();
+        List<IPatternDetails> result = new ArrayList<>();
+        for (Object pattern : iterable) {
+            if (pattern instanceof IPatternDetails details) result.add(details);
+        }
+        return result;
+    }
+
     private static boolean isPatternBusy(BlockEntity be) {
         if (be instanceof PatternProviderLogicHost host) return host.getLogic().isBusy();
-        if (be instanceof TileAssemblerMatrixPattern matrix) {
+        if (isMatrixSource(be)) {
             // ExtendedAE's isBusy() is cluster-wide and also reports true while a
             // pattern core has not yet joined a cluster. Track its real worker.
-            return getMatrixPatternCraft(matrix) != null;
+            return getMatrixPatternCraft(be) != null;
         }
-        if (be instanceof AdvPatternProviderLogicHost host) return host.getLogic().isBusy();
+        if (isAdvancedPatternProvider(be)) {
+            return invokeBoolean(invokeNoArg(be, "getLogic"), "isBusy");
+        }
         if (isEcoPatternBus(be)) {
             // NeoECO's isBusy() describes the whole shared cluster, not this physical bus.
             return getEcoBusCraft(be.getBlockPos()) != null;
@@ -186,15 +215,19 @@ public class CraftTracker {
     private static boolean isPatternLocked(BlockEntity be) {
         if (be instanceof PatternProviderLogicHost host)
             return host.getLogic().getCraftingLockedReason() != LockCraftingMode.NONE;
-        if (be instanceof AdvPatternProviderLogicHost host)
-            return host.getLogic().getCraftingLockedReason() != LockCraftingMode.NONE;
+        if (isAdvancedPatternProvider(be)) {
+            Object reason = invokeNoArg(invokeNoArg(be, "getLogic"), "getCraftingLockedReason");
+            return reason != null && reason != LockCraftingMode.NONE;
+        }
         return false;
     }
 
     private static List<IPatternDetails> getPatterns(BlockEntity be) {
         if (be instanceof PatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
-        if (be instanceof TileAssemblerMatrixPattern matrix) return matrix.getAvailablePatterns();
-        if (be instanceof AdvPatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
+        if (isMatrixSource(be)) return asPatternList(invokeNoArg(be, "getAvailablePatterns"));
+        if (isAdvancedPatternProvider(be)) {
+            return asPatternList(invokeNoArg(invokeNoArg(be, "getLogic"), "getAvailablePatterns"));
+        }
         if (isEcoPatternBus(be)) {
             // getAvailablePatterns() is a cluster-wide merged list. A physical bus must only
             // be matched against the patterns stored in that particular block entity.
@@ -215,10 +248,10 @@ public class CraftTracker {
         Object candidate = null;
         if (be instanceof PatternProviderLogicHost host) {
             candidate = host.getLogic();
-        } else if (be instanceof TileAssemblerMatrixPattern matrix) {
-            candidate = matrix;
-        } else if (be instanceof AdvPatternProviderLogicHost host) {
-            candidate = host.getLogic();
+        } else if (isMatrixSource(be)) {
+            candidate = be;
+        } else if (isAdvancedPatternProvider(be)) {
+            candidate = invokeNoArg(be, "getLogic");
         } else if (isEcoPatternBus(be)) {
             candidate = be;
         }
@@ -227,13 +260,7 @@ public class CraftTracker {
 
     @Nullable
     private static IGrid getGrid(BlockEntity be) {
-        if (be instanceof TileAssemblerMatrixPattern matrix) {
-            try { return matrix.getGrid(); } catch (Exception ignored) {}
-        }
-        if (be instanceof AdvPatternProviderLogicHost host) {
-            try { return host.getGrid(); } catch (Exception ignored) {}
-        }
-        if (isEcoPatternBus(be)) {
+        if (isMatrixSource(be) || isAdvancedPatternProvider(be) || isEcoPatternBus(be)) {
             Object grid = invokeNoArg(be, "getGrid");
             if (grid instanceof IGrid result) return result;
         }
@@ -505,8 +532,8 @@ public class CraftTracker {
 
         BlockPos equalMatch = null;
         for (Object value : iterable) {
-            if (!(value instanceof TileAssemblerMatrixPattern matrix)) continue;
-            for (IPatternDetails available : matrix.getAvailablePatterns()) {
+            if (!(value instanceof BlockEntity matrix) || !isMatrixSource(matrix)) continue;
+            for (IPatternDetails available : getPatterns(matrix)) {
                 if (available == pattern) return matrix.getBlockPos();
                 if (equalMatch == null && available.equals(pattern)) equalMatch = matrix.getBlockPos();
             }
@@ -600,7 +627,7 @@ public class CraftTracker {
         return executions.values().iterator().next();
     }
 
-    private static @Nullable ProviderCraft getMatrixPatternCraft(TileAssemblerMatrixPattern matrix) {
+    private static @Nullable ProviderCraft getMatrixPatternCraft(BlockEntity matrix) {
         BlockPos patternPosition = matrix.getBlockPos();
         Map<Object, ProviderCraft> executions = currentMatrixPatternCrafts.get(patternPosition);
         if (executions == null) {
@@ -652,8 +679,8 @@ public class CraftTracker {
     }
 
     private static void recoverMatrixExecutions(
-            TileAssemblerMatrixPattern matrix, Map<Object, ProviderCraft> executions) {
-        Object cluster = matrix.getCluster();
+            BlockEntity matrix, Map<Object, ProviderCraft> executions) {
+        Object cluster = invokeNoArg(matrix, "getCluster");
         Object blocks = invokeNoArg(cluster, "getBlockEntities");
         if (!(blocks instanceof java.util.Iterator<?> iterator)) return;
 
@@ -691,8 +718,8 @@ public class CraftTracker {
     }
 
     private static boolean isMatrixPatternOwnedBy(
-            TileAssemblerMatrixPattern matrix, IPatternDetails activePattern) {
-        for (IPatternDetails available : matrix.getAvailablePatterns()) {
+            BlockEntity matrix, IPatternDetails activePattern) {
+        for (IPatternDetails available : getPatterns(matrix)) {
             if (available == activePattern || available.equals(activePattern)) return true;
         }
         return false;
@@ -1553,7 +1580,7 @@ public class CraftTracker {
                 }
                 if (!providerBusy && provider != null) currentProviderCrafts.remove(provider);
             } else if (isMatrixSource(be)) {
-                ProviderCraft recorded = getMatrixPatternCraft((TileAssemblerMatrixPattern) be);
+                ProviderCraft recorded = getMatrixPatternCraft(be);
                 if (recorded != null && containsPatternOutput(patterns, recorded.outputId())) {
                     providerCraftingId = recorded.outputId();
                 }
@@ -1625,7 +1652,7 @@ public class CraftTracker {
             if (BuiltInRegistries.FLUID.containsKey(regKey)) {
                 return new OutputItem(regKey, TYPE_FLUID);
             }
-        } else if (key instanceof MekanismKey) {
+        } else if (hasType(key, MEKANISM_KEY_CLASS)) {
             return new OutputItem(regKey, TYPE_CHEMICAL);
         }
         return null;
@@ -1741,8 +1768,9 @@ public class CraftTracker {
         if (be instanceof PatternProviderLogicHost host) {
             return host.getLogic().getReturnInv();
         }
-        if (be instanceof AdvPatternProviderLogicHost host) {
-            return host.getLogic().getReturnInv();
+        if (isAdvancedPatternProvider(be)) {
+            Object returnInv = invokeNoArg(invokeNoArg(be, "getLogic"), "getReturnInv");
+            if (returnInv instanceof GenericStackInv result) return result;
         }
         return null;
     }
