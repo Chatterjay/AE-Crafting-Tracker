@@ -5,6 +5,9 @@
   "chat.crafting_tracker.status_disabled": "合成追踪：已禁用",
 
   "item.crafting_tracker.network_locator": "网络定位器",
+  "tooltip.crafting_tracker.network_locator.bind": "潜行并右键 AE 网络方块进行绑定",
+  "tooltip.crafting_tracker.network_locator.filter": "对空气右键配置物品筛选",
+  "tooltip.crafting_tracker.network_locator.id": "高亮时潜行显示物品 ID",
   "msg.crafting_tracker.locator.bound": "已绑定至 %s 处的 AE 网络",
   "msg.crafting_tracker.locator.bound_to": "已绑定至 %s 处的 AE 网络",
   "msg.crafting_tracker.locator.not_bound": "未绑定任何 AE 网络",
@@ -76,7 +79,7 @@
   "crafting_tracker.config.diagnostics.debugTracking": "追踪诊断",
   "crafting_tracker.config.diagnostics.debugTracking.tooltip": "记录详细供应器状态转换，用于排查闪烁或状态不更新",
   "crafting_tracker.config.diagnostics.debugLogIntervalTicks": "诊断日志间隔（tick）",
-  "crafting_tracker.config.diagnostics.debugLogIntervalTicks.tooltip": "同一供应器重复输出诊断日志的最小 tick 间隔",
+  "crafting_tracker.config.diagnostics.debugLogIntervalTicks.tooltip": "重复诊断日志的最小间隔，默认 100 tick（5 秒）",
 
   "crafting_tracker.tooltip.ae_cpu_priority.right_click": "右键提升发配优先级",
   "crafting_tracker.tooltip.ae_cpu_priority.shift_right_click": "Shift+右键降低发配优先级",

@@ -14,9 +14,11 @@ import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 
 import org.chatterjay.crafting_tracker.Crafting_tracker;
+import org.chatterjay.crafting_tracker.config.CTConfig;
 import org.chatterjay.crafting_tracker.network.payloads.S2CLocatorHighlights;
 import org.chatterjay.crafting_tracker.server.CraftTracker;
 import org.chatterjay.crafting_tracker.server.NetworkLocatorScanner;
+import org.chatterjay.crafting_tracker.util.ModLogger;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
@@ -177,6 +179,9 @@ public class NetworkLocatorMenu extends AbstractContainerMenu {
         if (toolStack.isEmpty()) return;
 
         NetworkLocatorTool.setAllFilters(toolStack, getFilterStacks(), player.level().registryAccess());
+        ModLogger.debugThrottled("locator.filters." + player.getUUID(), CTConfig.debugLogIntervalTicks,
+                "Locator filters changed player={} filters={}",
+                player.getGameProfile().getName(), getFilterStacks());
         rescanCooldown = RESCAN_INTERVAL;
         performScan();
     }
@@ -196,12 +201,19 @@ public class NetworkLocatorMenu extends AbstractContainerMenu {
         BlockPos boundPos = NetworkLocatorTool.getBoundPos(toolStack);
         ResourceLocation boundDim = NetworkLocatorTool.getBoundDimension(toolStack);
         if (boundPos == null || boundDim == null || !player.level().dimension().location().equals(boundDim)) {
+            ModLogger.debugThrottled("locator.menu.no_bound." + player.getUUID(), CTConfig.debugLogIntervalTicks,
+                    "Locator menu scan skipped player={} reason=invalid_binding bound={} dimension={}",
+                    player.getGameProfile().getName(), boundPos, boundDim);
             sendHighlights(Map.of());
             return;
         }
 
         Map<BlockPos, List<S2CLocatorHighlights.LocatorHit>> results =
                 NetworkLocatorScanner.scan((ServerLevel) player.level(), boundPos, filterContainer, player);
+        ModLogger.debugThrottled("locator.menu.result." + player.getUUID(), CTConfig.debugLogIntervalTicks,
+                "Locator menu scan result player={} bound={} blocks={} hits={}",
+                player.getGameProfile().getName(), boundPos, results.size(),
+                results.values().stream().mapToInt(List::size).sum());
         sendHighlights(results);
     }
 
@@ -220,6 +232,9 @@ public class NetworkLocatorMenu extends AbstractContainerMenu {
             long gameTime = sp.serverLevel().getGameTime();
             int remaining = CraftTracker.getRuntimeRemainingTicks(sp.getUUID(), gameTime);
             S2CLocatorHighlights packet = new S2CLocatorHighlights(results, remaining);
+            ModLogger.debugThrottled("locator.menu.packet." + sp.getUUID(), CTConfig.debugLogIntervalTicks,
+                    "Locator menu sends packet player={} blocks={} runtimeRemainingTicks={}",
+                    sp.getGameProfile().getName(), results.size(), remaining);
             net.neoforged.neoforge.network.PacketDistributor.sendToPlayer(sp, packet);
         }
     }

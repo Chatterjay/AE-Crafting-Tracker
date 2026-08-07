@@ -8,9 +8,11 @@ import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.math.Axis;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
@@ -51,6 +53,7 @@ import org.chatterjay.crafting_tracker.client.ClientLocatorCache;
 import org.chatterjay.crafting_tracker.config.CTConfig;
 import org.chatterjay.crafting_tracker.network.payloads.S2CCraftHighlightData.HighlightEntry;
 import org.chatterjay.crafting_tracker.network.payloads.S2CLocatorHighlights.LocatorHit;
+import org.chatterjay.crafting_tracker.util.ModLogger;
 import org.joml.Matrix4f;
 
 @EventBusSubscriber(modid = Crafting_tracker.MODID, value = Dist.CLIENT)
@@ -141,6 +144,10 @@ public class CraftHighlightRenderer {
 
         if (highlights.isEmpty() && locatorHits.isEmpty()) return;
 
+        ModLogger.debugThrottled("client.render.summary", CTConfig.debugLogIntervalTicks,
+                "Client render pass providers={} locatorBlocks={} providerPositions={} locatorPositions={}",
+                highlights.size(), locatorHits.size(), positionSummary(highlights), locatorHits.keySet());
+
         Camera camera = mc.gameRenderer.getMainCamera();
         Vec3 camPos = camera.getPosition();
         PoseStack poseStack = event.getPoseStack();
@@ -223,7 +230,7 @@ public class CraftHighlightRenderer {
         }
         for (var entry : locatorHits.entrySet()) {
             if (providerLabelPositions.contains(entry.getKey())) continue;
-            renderLocatorLabel(mc, poseStack, font, bufferSource, camera, entry.getKey(), entry.getValue().size());
+            renderLocatorLabel(mc, poseStack, font, bufferSource, camera, entry.getKey(), entry.getValue());
         }
         bufferSource.endBatch(SOLID_COLOR_NO_DEPTH);
         bufferSource.endBatch();
@@ -256,11 +263,11 @@ public class CraftHighlightRenderer {
         int color = getProviderColor(entry.statusOrdinal());
         String line1 = statusLabel(entry.statusOrdinal());
         String line2;
-        if (entry.currentCraftingId() != null) {
-            line2 = Component.translatable(
-                    "overlay.crafting_tracker.current_id",
-                    entry.currentCraftingId()
-            ).getString();
+        boolean showCurrentId = mc.player != null
+                && mc.player.isCrouching()
+                && entry.currentCraftingId() != null;
+        if (showCurrentId) {
+            line2 = entry.currentCraftingId().toString();
         } else {
             int outputs = entry.outputs() == null ? 0 : entry.outputs().size();
             line2 = Component.translatable("overlay.crafting_tracker.outputs", outputs).getString();
@@ -271,8 +278,15 @@ public class CraftHighlightRenderer {
 
     private static void renderLocatorLabel(Minecraft mc, PoseStack poseStack, Font font,
                                            MultiBufferSource.BufferSource bufferSource,
-                                           Camera camera, BlockPos pos, int hits) {
-        String line2 = Component.translatable("overlay.crafting_tracker.matches", hits).getString();
+                                           Camera camera, BlockPos pos, List<LocatorHit> hits) {
+        String line2;
+        if (mc.player != null && mc.player.isCrouching()) {
+            line2 = hits.stream()
+                    .map(hit -> hit.itemId().toString())
+                    .collect(Collectors.joining("\n"));
+        } else {
+            line2 = Component.translatable("overlay.crafting_tracker.matches", hits.size()).getString();
+        }
         renderBadge(mc, poseStack, font, bufferSource, camera, pos,
                 Component.translatable("overlay.crafting_tracker.locator").getString(), line2, LOCATOR_COLOR, 230);
     }
@@ -283,9 +297,14 @@ public class CraftHighlightRenderer {
                                     String line1, String line2, int rgb, int alpha) {
         int maxWidth = 92;
         String top = trimToWidth(font, line1, maxWidth);
-        String bottomText = trimToWidth(font, line2, maxWidth);
-        float labelWidth = Math.max(font.width(top), font.width(bottomText)) + 10f;
-        float labelHeight = font.lineHeight * 2 + 8f;
+        List<String> bottomLines = wrapToWidth(font, line2, maxWidth);
+        float bottomWidth = 0f;
+        for (String line : bottomLines) {
+            bottomWidth = Math.max(bottomWidth, font.width(line));
+        }
+        float labelWidth = Math.max(font.width(top), bottomWidth) + 10f;
+        float labelHeight = font.lineHeight * (bottomLines.size() + 1)
+                + 2f * bottomLines.size() + 4f;
 
         AABB bounds = getCombinedShapeBounds(mc, pos);
         double labelY = pos.getY() + bounds.maxY + 0.95;
@@ -318,9 +337,13 @@ public class CraftHighlightRenderer {
         font.drawInBatch(top, -font.width(top) / 2f, 0f,
                 textColor, false, matrix, bufferSource,
                 Font.DisplayMode.SEE_THROUGH, 0, LightTexture.FULL_BRIGHT);
-        font.drawInBatch(bottomText, -font.width(bottomText) / 2f, font.lineHeight + 2,
-                secondaryColor, false, matrix, bufferSource,
-                Font.DisplayMode.SEE_THROUGH, 0, LightTexture.FULL_BRIGHT);
+        for (int index = 0; index < bottomLines.size(); index++) {
+            String bottomLine = bottomLines.get(index);
+            float y = (index + 1) * (font.lineHeight + 2f);
+            font.drawInBatch(bottomLine, -font.width(bottomLine) / 2f, y,
+                    secondaryColor, false, matrix, bufferSource,
+                    Font.DisplayMode.SEE_THROUGH, 0, LightTexture.FULL_BRIGHT);
+        }
 
         poseStack.popPose();
     }
@@ -468,7 +491,11 @@ public class CraftHighlightRenderer {
                                         MultiBufferSource bufferSource,
                                         float offsetX, float size) {
         ItemStack displayStack = new ItemStack(BuiltInRegistries.ITEM.get(out.itemId()));
-        if (displayStack.isEmpty()) return;
+        if (displayStack.isEmpty()) {
+            ModLogger.debugThrottled("client.icon.item." + out.itemId(), CTConfig.debugLogIntervalTicks,
+                    "Provider icon item unavailable pos={} id={}", pos, out.itemId());
+            return;
+        }
         Minecraft mc = Minecraft.getInstance();
         BakedModel model = mc.getItemRenderer().getModel(displayStack, mc.level, mc.player, 0);
         TextureAtlasSprite sprite = getDisplaySprite(out.itemId(), model);
@@ -481,10 +508,18 @@ public class CraftHighlightRenderer {
                                          MultiBufferSource bufferSource,
                                          float offsetX, float size) {
         Fluid fluid = BuiltInRegistries.FLUID.get(out.itemId());
-        if (fluid == null) return;
+        if (fluid == null) {
+            ModLogger.debugThrottled("client.icon.fluid." + out.itemId(), CTConfig.debugLogIntervalTicks,
+                    "Provider icon fluid unavailable pos={} id={}", pos, out.itemId());
+            return;
+        }
         var ext = IClientFluidTypeExtensions.of(fluid);
         ResourceLocation stillTex = ext.getStillTexture(new FluidStack(fluid, 1));
-        if (stillTex == null) return;
+        if (stillTex == null) {
+            ModLogger.debugThrottled("client.icon.fluid_texture." + out.itemId(), CTConfig.debugLogIntervalTicks,
+                    "Provider fluid icon texture unavailable pos={} id={}", pos, out.itemId());
+            return;
+        }
         Minecraft mc = Minecraft.getInstance();
         TextureAtlasSprite sprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(stillTex);
         int tint = ext.getTintColor(new FluidStack(fluid, 1));
@@ -497,11 +532,23 @@ public class CraftHighlightRenderer {
                                             MultiBufferSource bufferSource, Minecraft mc,
                                             float offsetX, float size) {
         Registry<Chemical> chemicalRegistry = mc.level.registryAccess().registry(MekanismAPI.CHEMICAL_REGISTRY_NAME).orElse(null);
-        if (chemicalRegistry == null) return;
+        if (chemicalRegistry == null) {
+            ModLogger.debugThrottled("client.icon.chemical_registry", CTConfig.debugLogIntervalTicks,
+                    "Provider chemical icon registry unavailable pos={} id={}", pos, out.itemId());
+            return;
+        }
         Chemical chemical = chemicalRegistry.get(out.itemId());
-        if (chemical == null) return;
+        if (chemical == null) {
+            ModLogger.debugThrottled("client.icon.chemical." + out.itemId(), CTConfig.debugLogIntervalTicks,
+                    "Provider chemical icon unavailable pos={} id={}", pos, out.itemId());
+            return;
+        }
         ResourceLocation icon = chemical.getIcon();
-        if (icon == null) return;
+        if (icon == null) {
+            ModLogger.debugThrottled("client.icon.chemical_texture." + out.itemId(), CTConfig.debugLogIntervalTicks,
+                    "Provider chemical icon texture unavailable pos={} id={}", pos, out.itemId());
+            return;
+        }
         TextureAtlasSprite sprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(icon);
         VertexConsumer consumer = bufferSource.getBuffer(TINTED_SPRITE_NO_DEPTH);
         renderTintedSprite(consumer, poseStack, pos, camera, offsetX, size, sprite, chemical.getTint());
@@ -512,7 +559,11 @@ public class CraftHighlightRenderer {
                                           MultiBufferSource bufferSource,
                                           float offsetX, float size) {
         ItemStack displayStack = new ItemStack(BuiltInRegistries.ITEM.get(hit.itemId()));
-        if (displayStack.isEmpty()) return;
+        if (displayStack.isEmpty()) {
+            ModLogger.debugThrottled("client.icon.locator_item." + hit.itemId(), CTConfig.debugLogIntervalTicks,
+                    "Locator icon item unavailable pos={} id={}", pos, hit.itemId());
+            return;
+        }
         Minecraft mc = Minecraft.getInstance();
         BakedModel model = mc.getItemRenderer().getModel(displayStack, mc.level, mc.player, 0);
         TextureAtlasSprite sprite = getDisplaySprite(hit.itemId(), model);
@@ -526,11 +577,23 @@ public class CraftHighlightRenderer {
                                               float offsetX, float size) {
         if (mc.level == null) return;
         Registry<Chemical> chemicalRegistry = mc.level.registryAccess().registry(MekanismAPI.CHEMICAL_REGISTRY_NAME).orElse(null);
-        if (chemicalRegistry == null) return;
+        if (chemicalRegistry == null) {
+            ModLogger.debugThrottled("client.icon.locator_chemical_registry", CTConfig.debugLogIntervalTicks,
+                    "Locator chemical icon registry unavailable pos={} id={}", pos, hit.itemId());
+            return;
+        }
         Chemical chemical = chemicalRegistry.get(hit.itemId());
-        if (chemical == null) return;
+        if (chemical == null) {
+            ModLogger.debugThrottled("client.icon.locator_chemical." + hit.itemId(), CTConfig.debugLogIntervalTicks,
+                    "Locator chemical icon unavailable pos={} id={}", pos, hit.itemId());
+            return;
+        }
         ResourceLocation icon = chemical.getIcon();
-        if (icon == null) return;
+        if (icon == null) {
+            ModLogger.debugThrottled("client.icon.locator_chemical_texture." + hit.itemId(), CTConfig.debugLogIntervalTicks,
+                    "Locator chemical icon texture unavailable pos={} id={}", pos, hit.itemId());
+            return;
+        }
         TextureAtlasSprite sprite = mc.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS).apply(icon);
         VertexConsumer consumer = bufferSource.getBuffer(TINTED_SPRITE_NO_DEPTH);
         renderTintedSprite(consumer, poseStack, pos, camera, offsetX, size, sprite, chemical.getTint());
@@ -595,5 +658,36 @@ public class CraftHighlightRenderer {
         String ellipsis = "...";
         int targetWidth = Math.max(0, maxWidth - font.width(ellipsis));
         return font.plainSubstrByWidth(text, targetWidth) + ellipsis;
+    }
+
+    private static String positionSummary(List<HighlightEntry> entries) {
+        StringBuilder summary = new StringBuilder();
+        for (HighlightEntry entry : entries) {
+            if (!summary.isEmpty()) summary.append(',');
+            summary.append(entry.pos());
+        }
+        return summary.toString();
+    }
+
+    private static List<String> wrapToWidth(Font font, String text, int maxWidth) {
+        List<String> lines = new ArrayList<>();
+        String value = text == null ? "" : text;
+        String[] explicitLines = value.split("\\n", -1);
+        for (String explicitLine : explicitLines) {
+            String remaining = explicitLine;
+            if (remaining.isEmpty()) {
+                lines.add("");
+                continue;
+            }
+            while (!remaining.isEmpty()) {
+                String line = font.plainSubstrByWidth(remaining, maxWidth);
+                if (line.isEmpty()) {
+                    line = remaining.substring(0, 1);
+                }
+                lines.add(line);
+                remaining = remaining.substring(line.length());
+            }
+        }
+        return lines.isEmpty() ? List.of("") : lines;
     }
 }

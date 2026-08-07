@@ -10,6 +10,7 @@ import org.chatterjay.crafting_tracker.server.CraftTracker;
 import org.chatterjay.crafting_tracker.util.AeCpuPrioritySelector;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Coerce;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -31,7 +32,28 @@ public abstract class ECOCraftingCPULogicCpuPriorityMixin {
 
     @Inject(method = "finishJob", at = @At("HEAD"))
     private void craftingtracker$clearRuntimePriorityOnJobFinished(boolean success, CallbackInfo ci) {
-        AeCpuPrioritySelector.clearRuntimeAfterJobFinished(AeCpuPrioritySelector.cpuFromLogic(this));
+        ICraftingCPU cpu = AeCpuPrioritySelector.cpuFromLogic(this);
+        CraftTracker.clearCpuPattern(cpu);
+        CraftTracker.clearProviderJob(this);
+        AeCpuPrioritySelector.clearRuntimeAfterJobFinished(cpu);
+    }
+
+    @Inject(
+            method = "recordPushedPattern(Lcn/dancingsnow/neoecoae/api/me/ExecutingCraftingJob;"
+                    + "Lcn/dancingsnow/neoecoae/impl/crafting/fastpath/ECOExtractedPatternExecution;J)V",
+            at = @At("HEAD"))
+    private void craftingtracker$recordFastPathPattern(
+            @Coerce Object job, @Coerce Object execution, long amount, CallbackInfo ci) {
+        CraftTracker.recordCpuPatternPush(AeCpuPrioritySelector.cpuFromLogic(this), execution);
+    }
+
+    @Inject(
+            method = "recordPushedPattern(Lcn/dancingsnow/neoecoae/api/me/ExecutingCraftingJob;"
+                    + "Lcn/dancingsnow/neoecoae/impl/crafting/fastpath/ECOExtractedPatternExecution;JZ)V",
+            at = @At("HEAD"))
+    private void craftingtracker$recordFastPathBatchPattern(
+            @Coerce Object job, @Coerce Object execution, long amount, boolean reusable, CallbackInfo ci) {
+        CraftTracker.recordCpuPatternPush(AeCpuPrioritySelector.cpuFromLogic(this), execution);
     }
 
     @Redirect(

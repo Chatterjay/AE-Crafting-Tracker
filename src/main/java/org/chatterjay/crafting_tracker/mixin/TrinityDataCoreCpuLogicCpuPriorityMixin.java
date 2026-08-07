@@ -2,6 +2,7 @@ package org.chatterjay.crafting_tracker.mixin;
 
 import appeng.api.networking.crafting.ICraftingCPU;
 import appeng.api.networking.crafting.ICraftingProvider;
+import org.chatterjay.crafting_tracker.server.CraftTracker;
 import org.chatterjay.crafting_tracker.util.AeCpuPrioritySelector;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -23,7 +24,10 @@ public abstract class TrinityDataCoreCpuLogicCpuPriorityMixin {
 
     @Inject(method = "finishJob", at = @At("HEAD"))
     private void craftingtracker$clearRuntimePriorityOnJobFinished(boolean success, CallbackInfo ci) {
-        AeCpuPrioritySelector.clearRuntimeAfterJobFinished(AeCpuPrioritySelector.cpuFromLogic(this));
+        ICraftingCPU cpu = AeCpuPrioritySelector.cpuFromLogic(this);
+        CraftTracker.clearCpuPattern(cpu);
+        CraftTracker.clearTrinityJob(this);
+        AeCpuPrioritySelector.clearRuntimeAfterJobFinished(cpu);
     }
 
     @Redirect(

@@ -10,6 +10,7 @@ import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
 import org.chatterjay.crafting_tracker.Crafting_tracker;
+import org.chatterjay.crafting_tracker.config.CTConfig;
 import org.chatterjay.crafting_tracker.client.ClientHighlightCache;
 import org.chatterjay.crafting_tracker.client.ClientLocatorCache;
 import org.chatterjay.crafting_tracker.item.NetworkLocatorMenu;
@@ -19,6 +20,7 @@ import org.chatterjay.crafting_tracker.network.payloads.C2SToggleRuntimeHighligh
 import org.chatterjay.crafting_tracker.network.payloads.C2SUpdateFilterSlot;
 import org.chatterjay.crafting_tracker.network.payloads.S2CCraftHighlightData;
 import org.chatterjay.crafting_tracker.network.payloads.S2CLocatorHighlights;
+import org.chatterjay.crafting_tracker.util.ModLogger;
 
 import net.neoforged.fml.loading.FMLEnvironment;
 
@@ -61,6 +63,9 @@ public class CraftTrackerNetwork {
                     context.enqueueWork(() -> {
                         var player = context.player();
                         if (player != null && player.containerMenu instanceof NetworkLocatorMenu menu) {
+                            ModLogger.debugThrottled("network.filter." + player.getUUID(), CTConfig.debugLogIntervalTicks,
+                                    "Received filter update packet player={} slot={} stack={}",
+                                    player.getGameProfile().getName(), data.slotIndex(), data.stack());
                             menu.updateFilterSlot(data.slotIndex(), data.stack());
                         }
                     });
@@ -74,6 +79,8 @@ public class CraftTrackerNetwork {
                     context.enqueueWork(() -> {
                         var player = context.player();
                         if (player != null) {
+                            ModLogger.debug("Received runtime highlight toggle packet player={} enable={}",
+                                    player.getGameProfile().getName(), data.enable());
                             MinecraftServer server = player.getServer();
                             if (server != null) {
                                 long gameTime = server.overworld().getGameTime();

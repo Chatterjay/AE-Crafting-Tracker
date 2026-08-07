@@ -1,8 +1,11 @@
 package org.chatterjay.crafting_tracker.server;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -32,9 +35,11 @@ import org.chatterjay.crafting_tracker.api.CraftStatus;
 import org.chatterjay.crafting_tracker.config.CTConfig;
 import org.chatterjay.crafting_tracker.network.payloads.S2CCraftHighlightData;
 import org.chatterjay.crafting_tracker.network.payloads.S2CCraftHighlightData.HighlightEntry;
+import org.chatterjay.crafting_tracker.util.ModLogger;
 import org.slf4j.Logger;
 
 import appeng.api.crafting.IPatternDetails;
+import appeng.api.inventories.InternalInventory;
 import appeng.api.stacks.AEFluidKey;
 import appeng.api.stacks.AEItemKey;
 import appeng.api.stacks.AEKey;
@@ -47,7 +52,10 @@ import appeng.api.networking.crafting.CraftingJobStatus;
 import appeng.api.networking.crafting.ICraftingCPU;
 import appeng.api.networking.crafting.ICraftingProvider;
 import appeng.api.networking.crafting.ICraftingService;
+import appeng.blockentity.crafting.MolecularAssemblerBlockEntity;
+import appeng.helpers.externalstorage.GenericStackInv;
 import appeng.helpers.patternprovider.PatternProviderLogicHost;
+import appeng.helpers.patternprovider.PatternProviderReturnInventory;
 
 import com.glodblock.github.extendedae.common.tileentities.matrix.TileAssemblerMatrixPattern;
 
@@ -60,6 +68,16 @@ public class CraftTracker {
     private static final int MAX_MISSED = 10;
     private static final long COOLDOWN_MS = 1000;
     private static final long OUTPUT_GRACE_MS = 2500;
+    private static final long ECO_HANDOFF_GRACE_MS = 1500;
+    private static final long MATRIX_HANDOFF_GRACE_MS = 1500;
+    private static final long HIGHLIGHT_HEARTBEAT_TICKS = 20;
+    private static final String ECO_CPU_CLASS = "cn.dancingsnow.neoecoae.api.me.ECOCraftingCPU";
+    private static final String ECO_PATTERN_BUS_CLASS =
+            "cn.dancingsnow.neoecoae.blocks.entity.crafting.ECOCraftingPatternBusBlockEntity";
+    private static final String TRINITY_CPU_CLASS =
+            "com.fish_dan_.data_energistics.common.crafting.trinity.execution.cpu.TrinityDataCoreVirtualCpu";
+    private static final String TRINITY_PATTERN_CORE_CLASS =
+            "com.fish_dan_.data_energistics.blockentity.TrinityPatternCoreBlockEntity";
 
     private static final Set<UUID> enabledPlayers = new HashSet<>();
     private static final Map<UUID, Long> runtimeHighlightExpiry = new HashMap<>();
@@ -69,11 +87,30 @@ public class CraftTracker {
     private static final Set<UUID> runtimeExplicitlyDisabled = new HashSet<>();
     private static final Map<BlockPos, TrackerEntry> entries = new HashMap<>();
     private static final Map<BlockPos, Boolean> prevProviderBusy = new HashMap<>();
-    private static final Map<BlockPos, Long> debugLastLogMs = new HashMap<>();
-    private static final Map<ICraftingProvider, ResourceLocation> currentProviderCrafts =
+    private static final Map<UUID, List<HighlightEntry>> lastHighlightSnapshots = new HashMap<>();
+    private static final Map<UUID, Integer> lastHighlightRuntimeStates = new HashMap<>();
+    private static final Map<UUID, Long> lastHighlightPacketTicks = new HashMap<>();
+    private static final Map<UUID, Long> lastHighlightSnapshotRevisions = new HashMap<>();
+    private static final Map<ICraftingProvider, ProviderCraft> currentProviderCrafts =
+            java.util.Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<BlockPos, Map<Object, ProviderCraft>> currentEcoBusCrafts = new HashMap<>();
+    private static final Map<Object, BlockPos> ecoThreadBusPositions = new IdentityHashMap<>();
+    private static final Map<Object, Integer> ecoThreadProgress = new IdentityHashMap<>();
+    private static final Map<BlockPos, Long> ecoBusHandoffUntilMs = new HashMap<>();
+    private static final ThreadLocal<Deque<EcoBusDispatch>> ecoBusDispatches =
+            ThreadLocal.withInitial(ArrayDeque::new);
+    private static final Map<BlockPos, Map<Object, ProviderCraft>> currentMatrixPatternCrafts = new HashMap<>();
+    private static final Map<BlockPos, MatrixHandoff> matrixPatternHandoffs = new HashMap<>();
+    private static final ThreadLocal<Deque<MatrixPatternDispatch>> matrixPatternDispatches =
+            ThreadLocal.withInitial(ArrayDeque::new);
+    private static final Map<UUID, ProviderCraft> currentTrinityCoreCrafts = new HashMap<>();
+    private static final Map<ICraftingCPU, ResourceLocation> currentCpuCrafts =
             java.util.Collections.synchronizedMap(new WeakHashMap<>());
     private static final LocatorTrackingService locatorTracking = new LocatorTrackingService();
+    @Nullable
+    private static MinecraftServer trackingServer;
     private static int scanCounter;
+    private static long highlightSnapshotRevision;
 
     static final int TYPE_ITEM = 0;
     static final int TYPE_FLUID = 1;
@@ -82,6 +119,10 @@ public class CraftTracker {
     private static final int MAX_OUTPUTS = 3;
 
     private record OutputItem(ResourceLocation id, int type) {}
+    private record ProviderCraft(ResourceLocation outputId, @Nullable UUID jobId) {}
+    private record EcoBusDispatch(BlockPos busPosition, ProviderCraft craft) {}
+    private record MatrixPatternDispatch(BlockPos patternPosition, ProviderCraft craft) {}
+    private record MatrixHandoff(ProviderCraft craft, long untilMs) {}
     private record AdjacentActivity(boolean active, String detail) {
         private static final AdjacentActivity NONE = new AdjacentActivity(false, "none");
     }
@@ -90,13 +131,55 @@ public class CraftTracker {
 
     private static boolean isPatternSource(BlockEntity be) {
         return be instanceof PatternProviderLogicHost || be instanceof TileAssemblerMatrixPattern
-                || be instanceof AdvPatternProviderLogicHost;
+                || be instanceof AdvPatternProviderLogicHost || isEcoPatternBus(be)
+                || isTrinityPatternCore(be);
+    }
+
+    private static boolean isMatrixSource(BlockEntity be) {
+        return be instanceof TileAssemblerMatrixPattern;
+    }
+
+    private static boolean isEcoPatternBus(BlockEntity be) {
+        return be != null && be.getClass().getName().equals(ECO_PATTERN_BUS_CLASS);
+    }
+
+    private static boolean isTrinityPatternCore(BlockEntity be) {
+        return be != null && be.getClass().getName().equals(TRINITY_PATTERN_CORE_CLASS);
+    }
+
+    private static Object invokeNoArg(Object target, String methodName) {
+        try {
+            return target.getClass().getMethod(methodName).invoke(target);
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private static Object invokeInt(Object target, String methodName, int value) {
+        try {
+            return target.getClass().getMethod(methodName, int.class).invoke(target, value);
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private static boolean invokeBoolean(Object target, String methodName) {
+        return Boolean.TRUE.equals(invokeNoArg(target, methodName));
     }
 
     private static boolean isPatternBusy(BlockEntity be) {
         if (be instanceof PatternProviderLogicHost host) return host.getLogic().isBusy();
-        if (be instanceof TileAssemblerMatrixPattern matrix) return matrix.isBusy();
+        if (be instanceof TileAssemblerMatrixPattern matrix) {
+            // ExtendedAE's isBusy() is cluster-wide and also reports true while a
+            // pattern core has not yet joined a cluster. Track its real worker.
+            return getMatrixPatternCraft(matrix) != null;
+        }
         if (be instanceof AdvPatternProviderLogicHost host) return host.getLogic().isBusy();
+        if (isEcoPatternBus(be)) {
+            // NeoECO's isBusy() describes the whole shared cluster, not this physical bus.
+            return getEcoBusCraft(be.getBlockPos()) != null;
+        }
+        if (isTrinityPatternCore(be)) return invokeBoolean(be, "hasWork");
         return false;
     }
 
@@ -112,6 +195,18 @@ public class CraftTracker {
         if (be instanceof PatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
         if (be instanceof TileAssemblerMatrixPattern matrix) return matrix.getAvailablePatterns();
         if (be instanceof AdvPatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
+        if (isEcoPatternBus(be)) {
+            // getAvailablePatterns() is a cluster-wide merged list. A physical bus must only
+            // be matched against the patterns stored in that particular block entity.
+            Object patterns = invokeNoArg(be, "getLocalAvailablePatterns");
+            if (patterns instanceof List<?> list) {
+                List<IPatternDetails> result = new ArrayList<>();
+                for (Object pattern : list) {
+                    if (pattern instanceof IPatternDetails details) result.add(details);
+                }
+                return result;
+            }
+        }
         return List.of();
     }
 
@@ -124,6 +219,8 @@ public class CraftTracker {
             candidate = matrix;
         } else if (be instanceof AdvPatternProviderLogicHost host) {
             candidate = host.getLogic();
+        } else if (isEcoPatternBus(be)) {
+            candidate = be;
         }
         return candidate instanceof ICraftingProvider provider ? provider : null;
     }
@@ -136,8 +233,44 @@ public class CraftTracker {
         if (be instanceof AdvPatternProviderLogicHost host) {
             try { return host.getGrid(); } catch (Exception ignored) {}
         }
+        if (isEcoPatternBus(be)) {
+            Object grid = invokeNoArg(be, "getGrid");
+            if (grid instanceof IGrid result) return result;
+        }
         IGridNode node = getGridNode(be);
         return node != null ? node.getGrid() : null;
+    }
+
+    private static boolean shouldTrackIdleProvider(
+            BlockEntity be, @Nullable OutputInfo info, AdjacentActivity adjacentActivity) {
+        if (info == null || info.isEmpty()) return false;
+        // A normal AE provider can have a requested CPU output without exposing a
+        // provider-local current ID or adjacent machine activity.
+        if (!info.outputs().isEmpty()) return true;
+        if (info.returnItems() || info.currentCraftingId() != null || adjacentActivity.active()) {
+            return true;
+        }
+        return isMatrixSource(be) && hasExternalCpuBusy(be);
+    }
+
+    private static boolean hasExternalCpuBusy(BlockEntity be) {
+        try {
+            IGrid grid = getGrid(be);
+            if (grid == null) return false;
+            ICraftingService service = grid.getCraftingService();
+            if (service == null) return false;
+            for (ICraftingCPU cpu : service.getCpus()) {
+                if (cpu.isBusy() && isExternalCpu(cpu)) return true;
+            }
+        } catch (Exception ignored) {
+            // Optional CPU implementations must not affect normal provider scanning.
+        }
+        return false;
+    }
+
+    private static boolean isExternalCpu(ICraftingCPU cpu) {
+        String className = cpu.getClass().getName();
+        return className.equals(ECO_CPU_CLASS) || className.equals(TRINITY_CPU_CLASS);
     }
 
     // --- end type abstractions ---
@@ -183,21 +316,484 @@ public class CraftTracker {
 
     public static int getRuntimeRemainingTicks(UUID playerId, long gameTime) {
         Long expiry = runtimeHighlightExpiry.get(playerId);
-        return expiry != null ? (int) Math.max(0, expiry - gameTime) : 0;
+        if (expiry == null) return 0;
+        if (expiry == Long.MAX_VALUE) return Integer.MAX_VALUE;
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(0L, expiry - gameTime));
     }
 
     /** Records the output of a pattern that a provider accepted for execution. */
     public static void recordProviderPatternPush(ICraftingProvider provider, IPatternDetails patternDetails) {
+        recordProviderPatternPush(provider, patternDetails, null);
+    }
+
+    private static void recordProviderPatternPush(
+            ICraftingProvider provider, IPatternDetails patternDetails, @Nullable UUID jobId) {
         if (provider == null || patternDetails == null) {
             return;
         }
         GenericStack output = patternDetails.getPrimaryOutput();
         if (output != null) {
-            currentProviderCrafts.put(provider, output.what().getId());
+            ProviderCraft previous = currentProviderCrafts.get(provider);
+            if (jobId == null && previous != null && previous.jobId() != null
+                    && previous.outputId().equals(output.what().getId())) {
+                return;
+            }
+            currentProviderCrafts.put(provider, new ProviderCraft(output.what().getId(), jobId));
+            markHighlightStateChanged();
+        }
+    }
+
+    /** Records an ECO bus dispatch with its job id when the bus accepted the execution. */
+    public static void recordEcoPatternBusPush(Object patternBus, Object execution, @Nullable UUID jobId) {
+        if (!(patternBus instanceof ICraftingProvider provider) || execution == null) return;
+        try {
+            Object details = execution.getClass().getMethod("details").invoke(execution);
+            if (details instanceof IPatternDetails patternDetails) {
+                recordProviderPatternPush(provider, patternDetails, jobId);
+            }
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            // NeoECO is optional and its execution wrapper can be unavailable during shutdown.
+        }
+    }
+
+    /** Opens a dispatch scope so the ECO worker thread can be tied to its source FD bus. */
+    public static void beginEcoPatternBusPush(Object patternBus, Object execution, @Nullable UUID jobId) {
+        if (!(patternBus instanceof BlockEntity be) || execution == null) return;
+        try {
+            Object details = execution.getClass().getMethod("details").invoke(execution);
+            if (details instanceof IPatternDetails patternDetails) {
+                GenericStack output = patternDetails.getPrimaryOutput();
+                if (output != null && output.what() != null) {
+                    ecoBusDispatches.get().push(new EcoBusDispatch(
+                            be.getBlockPos(), new ProviderCraft(output.what().getId(), jobId)));
+                }
+            }
+        } catch (ReflectiveOperationException ignored) {
+            // ECO's execution type is optional at runtime.
+        }
+    }
+
+    /** Opens a dispatch scope for ECO's fast-path batch request. */
+    public static void beginEcoBatchPatternBusPush(Object patternBus, Object request) {
+        if (!(patternBus instanceof BlockEntity be) || request == null) return;
+        try {
+            Object details = request.getClass().getMethod("details").invoke(request);
+            Object job = request.getClass().getMethod("craftingJobId").invoke(request);
+            UUID jobId = job instanceof UUID id ? id : null;
+            if (details instanceof IPatternDetails patternDetails) {
+                GenericStack output = patternDetails.getPrimaryOutput();
+                if (output != null && output.what() != null) {
+                    ecoBusDispatches.get().push(new EcoBusDispatch(
+                            be.getBlockPos(), new ProviderCraft(output.what().getId(), jobId)));
+                }
+            }
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            // ECO's batch request is optional at runtime.
+        }
+    }
+
+    /** Closes the dispatch scope after ECO has accepted or rejected the pattern. */
+    public static void endEcoPatternBusPush() {
+        Deque<EcoBusDispatch> dispatches = ecoBusDispatches.get();
+        if (!dispatches.isEmpty()) dispatches.pop();
+        if (dispatches.isEmpty()) ecoBusDispatches.remove();
+    }
+
+    /** Opens a scope that connects an ExtendedAE matrix worker to its physical pattern core. */
+    public static void beginMatrixPatternPush(Object patternCore, IPatternDetails patternDetails) {
+        if (!(patternCore instanceof BlockEntity be) || patternDetails == null) return;
+        GenericStack output = patternDetails.getPrimaryOutput();
+        if (output == null || output.what() == null) return;
+        matrixPatternDispatches.get().push(new MatrixPatternDispatch(
+                be.getBlockPos(), new ProviderCraft(output.what().getId(), null)));
+    }
+
+    /** Closes the ExtendedAE matrix dispatch scope after the provider call returns. */
+    public static void endMatrixPatternPush() {
+        Deque<MatrixPatternDispatch> dispatches = matrixPatternDispatches.get();
+        if (!dispatches.isEmpty()) dispatches.pop();
+        if (dispatches.isEmpty()) matrixPatternDispatches.remove();
+    }
+
+    /** Binds the matrix worker that accepted a job to the source pattern core. */
+    public static void attachMatrixThreadExecution(Object matrixThread) {
+        if (matrixThread == null) return;
+        MatrixPatternDispatch dispatch = matrixPatternDispatches.get().peek();
+        if (dispatch == null) return;
+
+        attachMatrixThreadExecution(dispatch.patternPosition(), matrixThread, dispatch.craft());
+    }
+
+    /**
+     * Captures a matrix job from the crafter that selected the worker. This is
+     * deliberately independent of the outer provider call stack, because a
+     * matrix can accept a follow-up job after the previous worker has been
+     * released.
+     */
+    public static void attachMatrixCrafterExecution(Object matrixCrafter, IPatternDetails pattern) {
+        if (matrixCrafter == null || pattern == null) return;
+
+        BlockPos patternPosition = findMatrixPatternPosition(matrixCrafter, pattern);
+        MatrixPatternDispatch dispatch = matrixPatternDispatches.get().peek();
+        if (patternPosition == null && dispatch != null) {
+            patternPosition = dispatch.patternPosition();
+        }
+        if (patternPosition == null) {
+            ModLogger.debugThrottled("matrix.accept.unresolved", CTConfig.debugLogIntervalTicks,
+                    "Matrix job accepted but source pattern was not resolved crafter={} pattern={}",
+                    matrixCrafter.getClass().getName(), pattern.getClass().getName());
+            return;
+        }
+
+        Object worker = findMatrixWorker(matrixCrafter, pattern);
+        if (worker == null) {
+            ModLogger.debugThrottled("matrix.accept.no_worker." + patternPosition.asLong(),
+                    CTConfig.debugLogIntervalTicks,
+                    "Matrix job accepted but worker was not resolved pos={} crafter={} pattern={}",
+                    patternPosition, matrixCrafter.getClass().getName(), pattern.getClass().getName());
+            return;
+        }
+
+        GenericStack output = pattern.getPrimaryOutput();
+        if (output == null || output.what() == null) return;
+        ModLogger.debugThrottled("matrix.accept." + patternPosition.asLong(),
+                CTConfig.debugLogIntervalTicks,
+                "Matrix job accepted pos={} outputId={} worker={} source={}",
+                patternPosition, output.what().getId(), System.identityHashCode(worker),
+                dispatch == null ? "cluster" : "dispatch");
+        attachMatrixThreadExecution(
+                patternPosition,
+                worker,
+                new ProviderCraft(output.what().getId(), dispatch == null ? null : dispatch.craft().jobId()));
+    }
+
+    private static void attachMatrixThreadExecution(
+            BlockPos patternPosition, Object matrixThread, ProviderCraft craft) {
+        Map<Object, ProviderCraft> executions = currentMatrixPatternCrafts
+                .computeIfAbsent(patternPosition, ignored -> new IdentityHashMap<>());
+        ProviderCraft previous = executions.put(matrixThread, craft);
+        matrixPatternHandoffs.put(
+                patternPosition,
+                new MatrixHandoff(craft, System.currentTimeMillis() + MATRIX_HANDOFF_GRACE_MS));
+        markHighlightStateChanged();
+
+        // The worker can accept the job before the next provider scan creates an
+        // entry. Create it here so a matrix craft is visible immediately.
+        TrackerEntry entry = entries.computeIfAbsent(patternPosition, ignored -> new TrackerEntry(0));
+        long now = System.currentTimeMillis();
+        entry.busyStartMs = now;
+        entry.activeStartMs = now;
+        entry.lastOutputSeenMs = now;
+        entry.lockStartMs = 0;
+        entry.stuck = false;
+        entry.tentative = false;
+        entry.missedCount = 0;
+        entry.cooldownUntilMs = 0;
+        entry.currentCraftingId = craft.outputId();
+        entry.outputs = List.of(buildOutputItem(craft.outputId()));
+        debugProviderEvent("matrix.worker_start", patternPosition, entry, now,
+                "outputId=" + craft.outputId()
+                        + " worker=" + System.identityHashCode(matrixThread)
+                        + (previous == null ? " new=true" : " new=false"));
+    }
+
+    @Nullable
+    private static BlockPos findMatrixPatternPosition(Object matrixCrafter, IPatternDetails pattern) {
+        Object cluster = invokeNoArg(matrixCrafter, "getCluster");
+        Object matrixPatterns = invokeNoArg(cluster, "getPatterns");
+        if (!(matrixPatterns instanceof Iterable<?> iterable)) return null;
+
+        BlockPos equalMatch = null;
+        for (Object value : iterable) {
+            if (!(value instanceof TileAssemblerMatrixPattern matrix)) continue;
+            for (IPatternDetails available : matrix.getAvailablePatterns()) {
+                if (available == pattern) return matrix.getBlockPos();
+                if (equalMatch == null && available.equals(pattern)) equalMatch = matrix.getBlockPos();
+            }
+        }
+        return equalMatch;
+    }
+
+    @Nullable
+    private static Object findMatrixWorker(Object matrixCrafter, IPatternDetails pattern) {
+        Object workers;
+        try {
+            workers = readField(matrixCrafter, "threads");
+        } catch (ReflectiveOperationException ignored) {
+            return null;
+        }
+        if (!(workers instanceof Object[] array)) return null;
+
+        Object equalMatch = null;
+        for (Object worker : array) {
+            Object currentPattern = invokeNoArg(worker, "getCurrentPattern");
+            if (currentPattern == pattern) return worker;
+            if (equalMatch == null && currentPattern != null && currentPattern.equals(pattern)) {
+                equalMatch = worker;
+            }
+        }
+        return equalMatch;
+    }
+
+    /** Binds a newly started ECO worker thread to the FD bus that dispatched it. */
+    public static void attachEcoThreadExecution(Object ecoThread) {
+        if (ecoThread == null) return;
+        EcoBusDispatch dispatch = ecoBusDispatches.get().peek();
+        if (dispatch == null) return;
+        currentEcoBusCrafts
+                .computeIfAbsent(dispatch.busPosition(), ignored -> new IdentityHashMap<>())
+                .put(ecoThread, dispatch.craft());
+        ecoThreadBusPositions.put(ecoThread, dispatch.busPosition());
+        ecoThreadProgress.remove(ecoThread);
+        ecoBusHandoffUntilMs.remove(dispatch.busPosition());
+        markHighlightStateChanged();
+
+        // ECO keeps a physical pattern bus busy across multiple worker runs. A new
+        // worker start is the reliable boundary for a fresh execution interval.
+        // A worker may start between periodic scans. Seed the entry directly so
+        // the first highlight packet cannot miss this execution window.
+        TrackerEntry entry = entries.computeIfAbsent(dispatch.busPosition(), ignored -> new TrackerEntry(0));
+        long now = System.currentTimeMillis();
+        entry.busyStartMs = now;
+        entry.activeStartMs = now;
+        entry.lastOutputSeenMs = now;
+        entry.lockStartMs = 0;
+        entry.stuck = false;
+        entry.tentative = false;
+        entry.missedCount = 0;
+        entry.cooldownUntilMs = 0;
+        entry.currentCraftingId = dispatch.craft().outputId();
+        entry.outputs = List.of(buildOutputItem(dispatch.craft().outputId()));
+        debugProviderEvent("eco.worker_start", dispatch.busPosition(), entry, now,
+                "outputId=" + dispatch.craft().outputId()
+                        + " jobId=" + dispatch.craft().jobId());
+    }
+
+    /** Removes a completed ECO execution as soon as its worker thread becomes free. */
+    public static void clearEcoThreadExecution(Object ecoThread) {
+        BlockPos busPosition = ecoThreadBusPositions.remove(ecoThread);
+        if (busPosition == null) return;
+        ecoThreadProgress.remove(ecoThread);
+        Map<Object, ProviderCraft> executions = currentEcoBusCrafts.get(busPosition);
+        if (executions == null) return;
+        executions.remove(ecoThread);
+        if (executions.isEmpty()) {
+            currentEcoBusCrafts.remove(busPosition);
+            startEcoBusHandoffGrace(busPosition);
+        }
+    }
+
+    private static @Nullable ProviderCraft getEcoBusCraft(BlockPos busPosition) {
+        Map<Object, ProviderCraft> executions = currentEcoBusCrafts.get(busPosition);
+        if (executions == null) {
+            return null;
+        }
+        if (executions.isEmpty()) {
+            currentEcoBusCrafts.remove(busPosition);
+            startEcoBusHandoffGrace(busPosition);
+            return null;
+        }
+
+        // clearWork is the authoritative lifecycle boundary. ECO can report a
+        // worker as idle for a tick while it is handing the next batch to the
+        // same thread; polling isBusy here caused intermittent highlight loss.
+        return executions.values().iterator().next();
+    }
+
+    private static @Nullable ProviderCraft getMatrixPatternCraft(TileAssemblerMatrixPattern matrix) {
+        BlockPos patternPosition = matrix.getBlockPos();
+        Map<Object, ProviderCraft> executions = currentMatrixPatternCrafts.get(patternPosition);
+        if (executions == null) {
+            executions = new IdentityHashMap<>();
+            currentMatrixPatternCrafts.put(patternPosition, executions);
+        }
+
+        List<Object> completedThreads = new ArrayList<>();
+        for (Object thread : executions.keySet()) {
+            if (!isMatrixThreadBusy(thread)) completedThreads.add(thread);
+        }
+        for (Object thread : completedThreads) {
+            executions.remove(thread);
+        }
+
+        // A matrix job can predate enabling the highlighter, or arrive through an
+        // optional integration path that does not retain the dispatch call stack.
+        // Recover only workers whose active pattern belongs to this exact core.
+        recoverMatrixExecutions(matrix, executions);
+        if (executions.isEmpty()) {
+            currentMatrixPatternCrafts.remove(patternPosition);
+            if (!completedThreads.isEmpty()) {
+                ModLogger.debugThrottled("matrix.thread_prune." + patternPosition.asLong(),
+                        CTConfig.debugLogIntervalTicks,
+                        "Released completed matrix worker mappings pos={} count={}",
+                        patternPosition, completedThreads.size());
+            }
+            MatrixHandoff handoff = matrixPatternHandoffs.get(patternPosition);
+            long now = System.currentTimeMillis();
+            if (handoff != null && handoff.untilMs() > now) {
+                ModLogger.debugThrottled("matrix.handoff." + patternPosition.asLong(),
+                        CTConfig.debugLogIntervalTicks,
+                        "Preserving matrix highlight between batches pos={} outputId={} remainingMs={}",
+                        patternPosition, handoff.craft().outputId(), handoff.untilMs() - now);
+                return handoff.craft();
+            }
+            matrixPatternHandoffs.remove(patternPosition);
+            return null;
+        }
+        MatrixHandoff previousHandoff = matrixPatternHandoffs.get(patternPosition);
+        ProviderCraft active = previousHandoff != null
+                && executions.containsValue(previousHandoff.craft())
+                ? previousHandoff.craft()
+                : executions.values().iterator().next();
+        matrixPatternHandoffs.put(
+                patternPosition,
+                new MatrixHandoff(active, System.currentTimeMillis() + MATRIX_HANDOFF_GRACE_MS));
+        return active;
+    }
+
+    private static void recoverMatrixExecutions(
+            TileAssemblerMatrixPattern matrix, Map<Object, ProviderCraft> executions) {
+        Object cluster = matrix.getCluster();
+        Object blocks = invokeNoArg(cluster, "getBlockEntities");
+        if (!(blocks instanceof java.util.Iterator<?> iterator)) return;
+
+        int recovered = 0;
+        while (iterator.hasNext()) {
+            Object block = iterator.next();
+            Object workers;
+            try {
+                workers = readField(block, "threads");
+            } catch (ReflectiveOperationException ignored) {
+                continue;
+            }
+            if (!(workers instanceof Object[] array)) continue;
+
+            for (Object worker : array) {
+                if (executions.containsKey(worker)) continue;
+                Object current = invokeNoArg(worker, "getCurrentPattern");
+                if (!(current instanceof IPatternDetails pattern)
+                        || !isMatrixPatternOwnedBy(matrix, pattern)) {
+                    continue;
+                }
+                GenericStack output = pattern.getPrimaryOutput();
+                if (output == null || output.what() == null) continue;
+                executions.put(worker, new ProviderCraft(output.what().getId(), null));
+                recovered++;
+            }
+        }
+
+        if (recovered > 0) {
+            ModLogger.debugThrottled("matrix.recover." + matrix.getBlockPos().asLong(),
+                    CTConfig.debugLogIntervalTicks,
+                    "Recovered active matrix workers pos={} count={}",
+                    matrix.getBlockPos(), recovered);
+        }
+    }
+
+    private static boolean isMatrixPatternOwnedBy(
+            TileAssemblerMatrixPattern matrix, IPatternDetails activePattern) {
+        for (IPatternDetails available : matrix.getAvailablePatterns()) {
+            if (available == activePattern || available.equals(activePattern)) return true;
+        }
+        return false;
+    }
+
+    private static boolean isMatrixThreadBusy(Object thread) {
+        if (invokeNoArg(thread, "getCurrentPattern") != null) return true;
+        Object inventory = invokeNoArg(thread, "getInternalInventory");
+        return inventory instanceof InternalInventory internalInventory && !internalInventory.isEmpty();
+    }
+
+    private static void startEcoBusHandoffGrace(BlockPos busPosition) {
+        ecoBusHandoffUntilMs.put(
+                busPosition,
+                System.currentTimeMillis() + ECO_HANDOFF_GRACE_MS);
+    }
+
+    private static long ecoBusHandoffRemaining(BlockPos busPosition, long now) {
+        long until = ecoBusHandoffUntilMs.getOrDefault(busPosition, 0L);
+        if (until <= now) {
+            ecoBusHandoffUntilMs.remove(busPosition);
+            return 0;
+        }
+        return until - now;
+    }
+
+    private static boolean preserveEcoHandoff(
+            BlockEntity be, BlockPos busPosition, TrackerEntry entry, long now, String phase) {
+        if (!isEcoPatternBus(be)) return false;
+        long remainingMs = ecoBusHandoffRemaining(busPosition, now);
+        if (remainingMs <= 0
+                || ((entry.outputs == null || entry.outputs.isEmpty())
+                        && entry.currentCraftingId == null)) {
+            return false;
+        }
+
+        entry.busyStartMs = 0;
+        entry.lockStartMs = 0;
+        entry.stuck = false;
+        entry.cooldownUntilMs = now + remainingMs;
+        if (entry.outputs != null && !entry.outputs.isEmpty()) {
+            resetActiveTimer(entry, now);
+        } else {
+            entry.activeStartMs = now;
+        }
+        debugProviderSample(phase, busPosition, entry, now,
+                "busy=false remainingMs=" + remainingMs);
+        return true;
+    }
+
+    /** Refreshes the timeout only when an ECO worker has made real progress. */
+    private static void refreshEcoProgress(BlockPos busPosition, TrackerEntry entry, long now) {
+        Map<Object, ProviderCraft> executions = currentEcoBusCrafts.get(busPosition);
+        if (executions == null || executions.isEmpty()) return;
+
+        boolean progressed = false;
+        for (Object thread : executions.keySet()) {
+            Object value = invokeNoArg(thread, "getProgress");
+            if (!(value instanceof Number number)) continue;
+            int current = number.intValue();
+            Integer previous = ecoThreadProgress.put(thread, current);
+            if (previous != null && previous.intValue() != current) {
+                progressed = true;
+            }
+        }
+        if (progressed) {
+            entry.busyStartMs = now;
+            entry.activeStartMs = now;
+            entry.stuck = false;
+            entry.cooldownUntilMs = 0;
+            debugProviderEvent("eco.progress", busPosition, entry, now,
+                    "executionCount=" + executions.size());
+        }
+    }
+
+    /** Records a Trinity dispatch only after its provider accepted ownership and CPU accounting completed. */
+    public static void recordTrinityDispatch(Object request, Object result) {
+        if (request == null || result == null) return;
+        try {
+            Object dispatched = result.getClass().getMethod("dispatched").invoke(result);
+            if (!Boolean.TRUE.equals(dispatched)) return;
+            Object provider = request.getClass().getMethod("provider").invoke(request);
+            Object patternDetails = request.getClass().getMethod("pattern").invoke(request);
+            Object job = request.getClass().getMethod("jobId").invoke(request);
+            if (provider instanceof ICraftingProvider craftingProvider
+                    && patternDetails instanceof IPatternDetails details) {
+                UUID jobId = job instanceof UUID id ? id : null;
+                recordProviderPatternPush(craftingProvider, details, jobId);
+                recordTrinityCorePattern(details, jobId);
+            }
+        } catch (ReflectiveOperationException ignored) {
+            // Trinity's dispatch types are optional at runtime.
         }
     }
 
     public static void onServerTick(MinecraftServer server) {
+        if (trackingServer != server) {
+            clearTransientTrackingState();
+            trackingServer = server;
+        }
+
         // Cleanup expired runtime highlights
         long gameTime = server.overworld().getGameTime();
         runtimeHighlightExpiry.entrySet().removeIf(e -> {
@@ -219,6 +815,10 @@ public class CraftTracker {
         long now = System.currentTimeMillis();
         int radius = CTConfig.scanRadius;
 
+        ModLogger.debugThrottled("server.tick", CTConfig.debugLogIntervalTicks,
+                "Tracker tick players={} entries={} radius={} scanInterval={} gameTime={}",
+                trackingPlayers.size(), entries.size(), radius, CTConfig.scanIntervalTicks, gameTime);
+
         // ================================================================
         // Locator tracking runs every tick, independent of tracking state.
         // ================================================================
@@ -230,10 +830,23 @@ public class CraftTracker {
 
         if (trackingPlayers.isEmpty()) {
             if (!entries.isEmpty()) {
+                ModLogger.debugThrottled("server.disabled", CTConfig.debugLogIntervalTicks,
+                        "Tracker disabled for all players; clearing {} server entries", entries.size());
                 entries.clear();
             }
+            lastHighlightSnapshots.clear();
+            lastHighlightRuntimeStates.clear();
+            lastHighlightPacketTicks.clear();
+            lastHighlightSnapshotRevisions.clear();
             return;
         }
+
+        Set<UUID> trackingPlayerIds = new HashSet<>();
+        for (ServerPlayer player : trackingPlayers) trackingPlayerIds.add(player.getUUID());
+        lastHighlightSnapshots.keySet().removeIf(playerId -> !trackingPlayerIds.contains(playerId));
+        lastHighlightRuntimeStates.keySet().removeIf(playerId -> !trackingPlayerIds.contains(playerId));
+        lastHighlightPacketTicks.keySet().removeIf(playerId -> !trackingPlayerIds.contains(playerId));
+        lastHighlightSnapshotRevisions.keySet().removeIf(playerId -> !trackingPlayerIds.contains(playerId));
 
         // Phase 1: every tick — refresh state for known entries + quick-check nearby for busy providers
         refreshEntries(server, now);
@@ -242,6 +855,9 @@ public class CraftTracker {
         // Phase 2: periodic scan — discover providers and update state
         scanCounter++;
         boolean doScan = scanCounter % CTConfig.scanIntervalTicks == 0;
+
+        ModLogger.debugThrottled("server.scan.phase", CTConfig.debugLogIntervalTicks,
+                "Tracker phases refresh=true quick=true periodicScan={} scanCounter={}", doScan, scanCounter);
 
         if (doScan) {
             Set<BlockPos> seen = new HashSet<>();
@@ -278,6 +894,10 @@ public class CraftTracker {
                 }
                 return false;
             });
+
+            ModLogger.debugThrottled("server.scan.result", CTConfig.debugLogIntervalTicks,
+                    "Periodic provider scan complete seen={} seenProviders={} trackedEntries={}",
+                    seen.size(), seenProviders.size(), entries.size());
         }
 
         // Phase 3: send highlights to each tracking player
@@ -291,7 +911,17 @@ public class CraftTracker {
                 if (!pos.closerThan(ppos, radius)) continue;
                 if (!level.hasChunk(pos.getX() >> 4, pos.getZ() >> 4)) continue;
 
-                CraftStatus status = computeStatus(e.getValue(), now);
+                TrackerEntry trackerEntry = e.getValue();
+                CraftStatus status = computeStatus(trackerEntry, now);
+                if (trackerEntry.lastSentStatus != status) {
+                    CraftStatus previousStatus = trackerEntry.lastSentStatus;
+                    trackerEntry.lastSentStatus = status;
+                    ModLogger.debugThrottled("provider.status." + pos.asLong(),
+                            CTConfig.debugLogIntervalTicks,
+                            "Provider status changed pos={} source={} from={} to={} currentId={} outputs={}",
+                            pos, trackerEntry.sourceClass, previousStatus, status,
+                            trackerEntry.currentCraftingId, outputSummary(trackerEntry.outputs));
+                }
                 var outputs = e.getValue().outputs;
                 boolean emptyOutputs = outputs == null || outputs.isEmpty();
                 boolean sendWithoutOutputs = shouldSendWithoutOutputs(e.getValue(), now);
@@ -319,7 +949,14 @@ public class CraftTracker {
                 ));
             }
 
+            highlightEntries.sort(java.util.Comparator.comparingLong(entry -> entry.pos().asLong()));
             int runtimeRemaining = getRuntimeRemainingTicks(player.getUUID(), gameTime);
+            if (!shouldSendHighlightSnapshot(player.getUUID(), highlightEntries, runtimeRemaining, gameTime)) {
+                continue;
+            }
+            ModLogger.debugThrottled("highlight.packet." + player.getUUID(), CTConfig.debugLogIntervalTicks,
+                    "Sending craft highlight packet player={} entries={} runtimeRemainingTicks={}",
+                    player.getGameProfile().getName(), highlightEntries.size(), runtimeRemaining);
             PacketDistributor.sendToPlayer(player, new S2CCraftHighlightData(highlightEntries, runtimeRemaining));
         }
     }
@@ -338,6 +975,20 @@ public class CraftTracker {
             if (adjacentBe == null) continue;
 
             BlockState state = level.getBlockState(adjacentPos);
+            if (adjacentBe instanceof MolecularAssemblerBlockEntity assembler
+                    && assembler.getCraftingProgress() > 0) {
+                ResourceLocation blockId = BuiltInRegistries.BLOCK.getKey(state.getBlock());
+                return new AdjacentActivity(true,
+                        blockId + "@" + dir.getSerializedName()
+                                + ".craftingProgress=" + assembler.getCraftingProgress());
+            }
+            int extendedProgress = getExtendedAssemblerProgress(adjacentBe);
+            if (extendedProgress > 0) {
+                ResourceLocation blockId = BuiltInRegistries.BLOCK.getKey(state.getBlock());
+                return new AdjacentActivity(true,
+                        blockId + "@" + dir.getSerializedName()
+                                + ".craftingProgress=" + extendedProgress);
+            }
             for (var property : state.getProperties()) {
                 String propertyName = property.getName().toLowerCase(Locale.ROOT);
                 if (!isActivityPropertyName(propertyName)) continue;
@@ -351,6 +1002,24 @@ public class CraftTracker {
             }
         }
         return AdjacentActivity.NONE;
+    }
+
+    private static int getExtendedAssemblerProgress(BlockEntity be) {
+        if (!be.getClass().getName().equals("com.glodblock.github.extendedae.common.tileentities.TileExMolecularAssembler")) {
+            return 0;
+        }
+        try {
+            var method = be.getClass().getMethod("getCraftingProgress", int.class);
+            for (int thread = 0; thread < 16; thread++) {
+                Object value = method.invoke(be, thread);
+                if (value instanceof Number progress && progress.intValue() > 0) {
+                    return progress.intValue();
+                }
+            }
+        } catch (ReflectiveOperationException ignored) {
+            // ExtendedAE is optional and its thread count can vary by version.
+        }
+        return 0;
     }
 
     private static boolean isActivityPropertyName(String name) {
@@ -405,7 +1074,9 @@ public class CraftTracker {
 
                         if (busy || locked) {
                             TrackerEntry entry = new TrackerEntry(locked ? now : 0);
+                            entry.sourceClass = be.getClass().getName();
                             entry.stuck = locked;
+                            if (busy && !locked) entry.busyStartMs = now;
                             var info = getOutputInfo(be, null);
                             applyOutputInfo(entry, info, now);
                             entries.put(immPos, entry);
@@ -414,26 +1085,17 @@ public class CraftTracker {
                                     "busy=" + busy + " locked=" + locked + " outputInfo=" + outputSummary(info));
                         } else {
                             var info = getOutputInfo(be, null);
-                            if (info != null) {
-                                boolean hasInv = hasAdjacentInventory(level, immPos);
-                                if (hasInv) {
-                                    TrackerEntry entry = new TrackerEntry(0);
-                                    applyOutputInfo(entry, info, now);
-                                    entry.tentative = true;
-                                    entry.cooldownUntilMs = now + 1000;
-                                    entries.put(immPos, entry);
-                                    debugProviderEvent("quick.create_tentative", immPos, entry, now,
-                                            "busy=false locked=false hasAdjacentInventory=true outputInfo=" + outputSummary(info));
-                                } else {
-                                    TrackerEntry entry = new TrackerEntry(now);
-                                    applyOutputInfo(entry, info, now);
-                                    entry.stuck = true;
-                                    entry.lockStartMs = now;
-                                    entries.put(immPos, entry);
-                                    prevProviderBusy.put(immPos, false);
-                                    debugProviderEvent("quick.create_stuck_no_adjacent", immPos, entry, now,
-                                            "busy=false locked=false hasAdjacentInventory=false outputInfo=" + outputSummary(info));
-                                }
+                            AdjacentActivity adjacentActivity = getAdjacentActivity(level, immPos);
+                            if (shouldTrackIdleProvider(be, info, adjacentActivity)) {
+                                TrackerEntry entry = new TrackerEntry(0);
+                                entry.sourceClass = be.getClass().getName();
+                                applyOutputInfo(entry, info, now);
+                                entry.tentative = true;
+                                entry.cooldownUntilMs = now + COOLDOWN_MS;
+                                entries.put(immPos, entry);
+                                debugProviderEvent("quick.create_active_machine", immPos, entry, now,
+                                        "busy=false locked=false adjacentActive=" + adjacentActivity.detail()
+                                                + " outputInfo=" + outputSummary(info));
                             }
                         }
                     }
@@ -451,10 +1113,10 @@ public class CraftTracker {
                 if (!level.hasChunk(pos.getX() >> 4, pos.getZ() >> 4)) continue;
                 BlockEntity be = level.getBlockEntity(pos);
                 if (!isPatternSource(be)) continue;
+                entry.sourceClass = be.getClass().getName();
 
                 boolean busy = isPatternBusy(be);
                 boolean locked = isPatternLocked(be);
-
                 if (busy) {
                     boolean startedBusy = entry.busyStartMs == 0;
                     boolean wasMarkedStuck = entry.stuck;
@@ -479,6 +1141,9 @@ public class CraftTracker {
                     } else if (!locked) {
                         entry.lockStartMs = 0;
                     }
+                    if (isEcoPatternBus(be) && !locked) {
+                        refreshEcoProgress(pos, entry, now);
+                    }
                     if (!locked && (startedBusy || wasMarkedStuck || wasThresholdStuck)) {
                         resetActiveTimer(entry, now);
                         if (wasMarkedStuck || wasThresholdStuck) {
@@ -492,6 +1157,10 @@ public class CraftTracker {
                     debugProviderSample("refresh.busy", pos, entry, now,
                             "busy=true locked=" + locked + " outputInfo=" + outputSummary(info));
                 } else {
+                    if (!locked && preserveEcoHandoff(
+                            be, pos, entry, now, "refresh.eco_handoff_grace")) {
+                        break;
+                    }
                     entry.busyStartMs = 0;
                     if (entry.stuck) {
                         var info = getOutputInfo(be, entry.outputs);
@@ -511,7 +1180,7 @@ public class CraftTracker {
                                             + " hasRequest=" + hasRequest
                                             + " hasAdjacentInventory=" + hasInv
                                             + " outputInfo=" + outputSummary(info));
-                        } else if (locked || (hasRequest && !hasInv)) {
+                        } else if (locked) {
                             entry.missedCount = 0;
                             entry.stuck = true;
                             if (entry.lockStartMs == 0) {
@@ -527,7 +1196,7 @@ public class CraftTracker {
                             entry.stuck = false;
                             entry.lockStartMs = 0;
                             entry.missedCount = 0;
-                            if (hasRequest) {
+                            if (adjacentActivity.active()) {
                                 resetActiveTimer(entry, now);
                                 entry.cooldownUntilMs = now + COOLDOWN_MS;
                             } else {
@@ -555,24 +1224,31 @@ public class CraftTracker {
                         if (cpuBusy) {
                             entry.missedCount = 0;
                             var info = getOutputInfo(be, entry.outputs);
-                            applyOutputInfo(entry, info, now);
                             AdjacentActivity adjacentActivity = getAdjacentActivity(level, pos);
-                            if (adjacentActivity.active()) {
+                            if (shouldTrackIdleProvider(be, info, adjacentActivity)) {
+                                applyOutputInfo(entry, info, now);
                                 resetActiveTimer(entry, now);
-                            }
-                            if (entry.outputs != null) {
                                 if (entry.cooldownUntilMs == 0 || entry.cooldownUntilMs - now < COOLDOWN_MS / 2) {
                                     entry.cooldownUntilMs = now + COOLDOWN_MS;
                                 }
+                                debugProviderSample("refresh.idle_cpu_busy", pos, entry, now,
+                                        "busy=false cpuBusy=true adjacentActive=" + adjacentActivity.detail()
+                                                + " outputInfo=" + outputSummary(info));
+                            } else {
+                                clearOutputImmediately(pos, entry, now, "provider_not_requested");
+                                debugProviderSample("refresh.idle_cpu_busy_clear", pos, entry, now,
+                                        "busy=false cpuBusy=true adjacentActive=" + adjacentActivity.detail()
+                                                + " outputInfo=" + outputSummary(info));
                             }
-                            debugProviderSample("refresh.idle_cpu_busy", pos, entry, now,
-                                    "busy=false cpuBusy=true adjacentActive=" + adjacentActivity.detail()
-                                            + " outputInfo=" + outputSummary(info));
                         } else if (now < entry.cooldownUntilMs) {
                             entry.missedCount = 0;
                             // CPU may have started a new job even if isGridCpuBusy was false
                             var info = getOutputInfo(be, entry.outputs);
-                            applyOutputInfo(entry, info, now);
+                            if (info == null || info.isEmpty()) {
+                                clearOutputImmediately(pos, entry, now, "cpu_idle_without_request");
+                            } else {
+                                applyOutputInfo(entry, info, now);
+                            }
                             debugProviderSample("refresh.cooldown", pos, entry, now,
                                     "busy=false cpuBusy=false outputInfo=" + outputSummary(info));
                         } else {
@@ -589,17 +1265,21 @@ public class CraftTracker {
                                 "busy=false outputInfo=" + outputSummary(info));
                     } else {
                         var info = getOutputInfo(be, entry.outputs);
-                        applyOutputInfo(entry, info, now);
-                        if (info != null || entry.outputs != null) {
+                        AdjacentActivity adjacentActivity = getAdjacentActivity(level, pos);
+                        if (shouldTrackIdleProvider(be, info, adjacentActivity)) {
+                            applyOutputInfo(entry, info, now);
                             entry.tentative = false;
                             entry.missedCount = 0;
                             entry.cooldownUntilMs = now + COOLDOWN_MS;
                             debugProviderEvent("refresh.tentative_promote", pos, entry, now,
-                                    "busy=false outputInfo=" + outputSummary(info));
+                                    "busy=false adjacentActive=" + adjacentActivity.detail()
+                                            + " outputInfo=" + outputSummary(info));
                         } else {
                             entry.lockStartMs = 0;
                             clearExpiredOutput(pos, entry, now);
-                            debugProviderSample("refresh.tentative_clear", pos, entry, now, "busy=false outputInfo=none");
+                            debugProviderSample("refresh.tentative_clear", pos, entry, now,
+                                    "busy=false adjacentActive=" + adjacentActivity.detail()
+                                            + " outputInfo=" + outputSummary(info));
                         }
                     }
                 }
@@ -635,100 +1315,58 @@ public class CraftTracker {
                     prevProviderBusy.put(immPos, active);
 
                     TrackerEntry existing = entries.get(immPos);
+                    if (existing != null) {
+                        // refreshEntries owns all state transitions for existing
+                        // entries. This scan only confirms the entry remains live.
+                        existing.sourceClass = be.getClass().getName();
+                        if (active || existing.stuck || now < existing.cooldownUntilMs
+                                || hasRecentOutput(existing, now)) {
+                            existing.missedCount = 0;
+                            seen.add(immPos);
+                        }
+                        continue;
+                    }
 
                     if (active) {
                         seen.add(immPos);
 
-                        var info = getOutputInfo(be, existing != null ? existing.outputs : null);
+                        var info = getOutputInfo(be, null);
 
-                        if (existing == null) {
-                            TrackerEntry entry = new TrackerEntry(locked ? now : 0);
-                            if (!locked) {
-                                entry.busyStartMs = now;
-                            }
-                            entry.stuck = locked;
-                            applyOutputInfo(entry, info, now);
-                            entries.put(immPos, entry);
-                            debugProviderEvent("scan.create_active", immPos, entry, now,
-                                    "busy=" + busy + " locked=" + locked + " outputInfo=" + outputSummary(info));
-                        } else {
-                            boolean startedBusy = busy && existing.busyStartMs == 0;
-                            boolean wasMarkedStuck = existing.stuck;
-                            boolean wasThresholdStuck = !existing.stuck && isDurationStuck(existing, now);
-
-                            existing.missedCount = 0;
-                            existing.cooldownUntilMs = 0;
-                            existing.tentative = false;
-                            existing.stuck = locked;
-                            applyOutputInfo(existing, info, now);
-                            if (!locked && existing.busyStartMs == 0) {
-                                existing.busyStartMs = now;
-                            }
-                            if (locked && existing.lockStartMs == 0) {
-                                existing.lockStartMs = now;
-                            } else if (!locked) {
-                                existing.lockStartMs = 0;
-                            }
-                            if (!locked && (startedBusy || wasMarkedStuck || wasThresholdStuck)) {
-                                resetActiveTimer(existing, now);
-                                if (wasMarkedStuck || wasThresholdStuck) {
-                                    debugProviderEvent("scan.recover_active", immPos, existing, now,
-                                            "busy=" + busy
-                                                    + " locked=false startedBusy=" + startedBusy
-                                                    + " wasMarkedStuck=" + wasMarkedStuck
-                                                    + " wasThresholdStuck=" + wasThresholdStuck
-                                                    + " outputInfo=" + outputSummary(info));
-                                }
-                            }
+                        TrackerEntry entry = new TrackerEntry(locked ? now : 0);
+                        entry.sourceClass = be.getClass().getName();
+                        if (!locked) {
+                            entry.busyStartMs = now;
                         }
+                        entry.stuck = locked;
+                        applyOutputInfo(entry, info, now);
+                        entries.put(immPos, entry);
+                        debugProviderEvent("scan.create_active", immPos, entry, now,
+                                "busy=" + busy + " locked=" + locked + " outputInfo=" + outputSummary(info));
+                    } else if (wasActive) {
+                        TrackerEntry entry = new TrackerEntry(0);
+                        entry.sourceClass = be.getClass().getName();
+                        var info = getOutputInfo(be, null);
+                        applyOutputInfo(entry, info, now);
+                        entry.cooldownUntilMs = now + COOLDOWN_MS;
+                        entries.put(immPos, entry);
+                        seen.add(immPos);
+                        debugProviderEvent("scan.create_cooldown_after_active", immPos, entry, now,
+                                "busy=false locked=false wasActive=true outputInfo=" + outputSummary(info));
                     } else {
-                        // Provider is idle now
-                        if (existing != null) {
-                            existing.busyStartMs = 0;
-                            if (existing.stuck) {
-                                existing.missedCount = 0;
-                                seen.add(immPos);
-                            } else if (wasActive) {
-                                existing.cooldownUntilMs = now + COOLDOWN_MS;
-                                existing.missedCount = 0;
-                                seen.add(immPos);
-                            } else if (now < existing.cooldownUntilMs) {
-                                // Still in cooldown — refresh item in case CPU switched jobs
-                                var info = getOutputInfo(be, existing.outputs);
-                                applyOutputInfo(existing, info, now);
-                                seen.add(immPos);
-                            }
-                        } else if (wasActive) {
+                        // Idle provider, no existing entry — check for an active requested output.
+                        var info = getOutputInfo(be, null);
+                        AdjacentActivity adjacentActivity = getAdjacentActivity(level, immPos);
+                        if (shouldTrackIdleProvider(be, info, adjacentActivity)) {
                             TrackerEntry entry = new TrackerEntry(0);
-                            var info = getOutputInfo(be, null);
+                            entry.sourceClass = be.getClass().getName();
                             applyOutputInfo(entry, info, now);
+                            entry.tentative = true;
                             entry.cooldownUntilMs = now + COOLDOWN_MS;
                             entries.put(immPos, entry);
                             seen.add(immPos);
-                            debugProviderEvent("scan.create_cooldown_after_active", immPos, entry, now,
-                                    "busy=false locked=false wasActive=true outputInfo=" + outputSummary(info));
-                        } else {
-                            // Idle provider, no existing entry — check if pattern matches a busy CPU or is requested
-                            var info = getOutputInfo(be, null);
-                            if (info != null) {
-                                TrackerEntry entry;
-                                if (hasAdjacentInventory(level, immPos)) {
-                                    entry = new TrackerEntry(0);
-                                    applyOutputInfo(entry, info, now);
-                                    entry.cooldownUntilMs = now + COOLDOWN_MS;
-                                    debugProviderEvent("scan.create_idle_requested", immPos, entry, now,
-                                            "busy=false locked=false hasAdjacentInventory=true outputInfo=" + outputSummary(info));
-                                } else {
-                                    entry = new TrackerEntry(now);
-                                    applyOutputInfo(entry, info, now);
-                                    entry.stuck = true;
-                                    entry.lockStartMs = now;
-                                    debugProviderEvent("scan.create_stuck_no_adjacent", immPos, entry, now,
-                                            "busy=false locked=false hasAdjacentInventory=false outputInfo=" + outputSummary(info));
-                                }
-                                entries.put(immPos, entry);
-                                seen.add(immPos);
-                            }
+                            debugProviderEvent("scan.create_active_machine", immPos, entry, now,
+                                    "busy=false locked=false adjacentActive=" + adjacentActivity.detail()
+                                            + " outputInfo=" + outputSummary(info));
                         }
                     }
                 }
@@ -741,12 +1379,18 @@ public class CraftTracker {
             entry.currentCraftingId = null;
             return;
         }
-        if (!samePrimaryOutput(entry.outputs, info.outputs()) || entry.activeStartMs == 0) {
-            entry.activeStartMs = now;
+        if (!info.outputs().isEmpty()) {
+            if (!samePrimaryOutput(entry.outputs, info.outputs()) || entry.activeStartMs == 0) {
+                entry.activeStartMs = now;
+            }
+            entry.outputs = List.copyOf(info.outputs());
+            entry.lastOutputSeenMs = now;
         }
-        entry.outputs = List.copyOf(info.outputs());
-        entry.currentCraftingId = info.currentCraftingId();
-        entry.lastOutputSeenMs = now;
+        if (info.currentCraftingId() != null) {
+            entry.currentCraftingId = info.currentCraftingId();
+        } else if (!info.outputs().isEmpty()) {
+            entry.currentCraftingId = null;
+        }
     }
 
     private static void clearExpiredOutput(BlockPos pos, TrackerEntry entry, long now) {
@@ -757,10 +1401,21 @@ public class CraftTracker {
             debugProviderEvent("output.clear_expired", pos, entry, now,
                     "lastOutputAgeMs=" + (entry.lastOutputSeenMs == 0 ? -1 : now - entry.lastOutputSeenMs));
         }
+        clearOutput(entry);
+    }
+
+    private static void clearOutput(TrackerEntry entry) {
         entry.outputs = null;
         entry.currentCraftingId = null;
         entry.activeStartMs = 0;
         entry.lastOutputSeenMs = 0;
+    }
+
+    private static void clearOutputImmediately(BlockPos pos, TrackerEntry entry, long now, String reason) {
+        if (entry.outputs != null || entry.currentCraftingId != null) {
+            debugProviderEvent("output.clear_immediate", pos, entry, now, reason);
+        }
+        clearOutput(entry);
     }
 
     private static boolean hasRecentOutput(TrackerEntry entry, long now) {
@@ -802,27 +1457,28 @@ public class CraftTracker {
         return entry.stuck
                 || entry.lockStartMs != 0
                 || entry.busyStartMs != 0
-                || entry.activeStartMs != 0
-                || now < entry.cooldownUntilMs;
+                || entry.currentCraftingId != null;
     }
 
     private static void debugProviderSample(String phase, BlockPos pos, TrackerEntry entry, long now, String detail) {
-        if (!CTConfig.debugTracking) return;
-        long intervalMs = Math.max(50L, CTConfig.debugLogIntervalTicks * 50L);
-        long last = debugLastLogMs.getOrDefault(pos, 0L);
-        if (now - last < intervalMs) return;
-        debugLastLogMs.put(pos, now);
-        debugProviderEvent(phase, pos, entry, now, detail);
+        logProviderDiagnostic("provider.sample.", phase, pos, entry, now, detail);
     }
 
     private static void debugProviderEvent(String phase, BlockPos pos, TrackerEntry entry, long now, String detail) {
+        logProviderDiagnostic("provider.event.", phase, pos, entry, now, detail);
+    }
+
+    private static void logProviderDiagnostic(
+            String category, String phase, BlockPos pos, TrackerEntry entry, long now, String detail) {
         if (!CTConfig.debugTracking) return;
-        LOGGER.info("[CraftTrackerDebug] phase={} pos={} {} {}",
+        ModLogger.debugThrottled(category + phase + "." + pos.asLong(), CTConfig.debugLogIntervalTicks,
+                "Provider event phase={} pos={} {} {}",
                 phase, pos, entryDebugSummary(entry, now), detail == null ? "" : detail);
     }
 
     private static String entryDebugSummary(TrackerEntry entry, long now) {
         return "stuck=" + entry.stuck
+                + " source=" + entry.sourceClass
                 + " tentative=" + entry.tentative
                 + " missed=" + entry.missedCount
                 + " cooldownMs=" + Math.max(0, entry.cooldownUntilMs - now)
@@ -853,6 +1509,15 @@ public class CraftTracker {
 
     private static @Nullable OutputInfo getOutputInfo(BlockEntity be, @Nullable List<OutputItem> prevOutputs) {
         try {
+            if (isTrinityPatternCore(be)) {
+                ProviderCraft recorded = getTrinityCoreCraft(be);
+                if (recorded != null) {
+                    return new OutputInfo(
+                            List.of(buildOutputItem(recorded.outputId())),
+                            recorded.outputId(), false);
+                }
+                return null;
+            }
             IGrid grid = getGrid(be);
             if (grid == null) return null;
             ICraftingService cs = grid.getCraftingService();
@@ -861,16 +1526,58 @@ public class CraftTracker {
             var patterns = getPatterns(be);
 
             // Collect up to MAX_OUTPUTS matching items in pattern order to form a queue.
-            // Items that match isCpuCraftingOutput OR isRequesting are included.
-            // The queue naturally advances: when item finishes (no longer matches),
-            // it drops out and remaining items shift forward.
+            // Matrix providers must use the CPU's current item only: isRequesting can
+            // remain true briefly after a matrix craft has already finished.
             List<OutputItem> results = new ArrayList<>();
+            boolean returnItems = false;
+            boolean providerBusy = isPatternBusy(be);
+            GenericStackInv returnInv = getReturnInventory(be);
+            if (returnInv != null) {
+                for (int slot = 0; slot < returnInv.size() && results.size() < MAX_OUTPUTS; slot++) {
+                    GenericStack returned = returnInv.getStack(slot);
+                    if (returned == null || returned.what() == null || returned.amount() <= 0) continue;
+                    OutputItem item = buildOutputItem(returned.what());
+                    if (item != null) {
+                        results.add(item);
+                        returnItems = true;
+                    }
+                }
+            }
+            ICraftingProvider provider = getCraftingProvider(be);
+            boolean exactPhysicalProvider = isEcoPatternBus(be) || isMatrixSource(be);
+            ResourceLocation providerCraftingId = null;
+            if (isEcoPatternBus(be)) {
+                ProviderCraft recorded = getEcoBusCraft(be.getBlockPos());
+                if (recorded != null && containsPatternOutput(patterns, recorded.outputId())) {
+                    providerCraftingId = recorded.outputId();
+                }
+                if (!providerBusy && provider != null) currentProviderCrafts.remove(provider);
+            } else if (isMatrixSource(be)) {
+                ProviderCraft recorded = getMatrixPatternCraft((TileAssemblerMatrixPattern) be);
+                if (recorded != null && containsPatternOutput(patterns, recorded.outputId())) {
+                    providerCraftingId = recorded.outputId();
+                }
+                if (!providerBusy && provider != null) currentProviderCrafts.remove(provider);
+            } else if (provider != null && providerBusy) {
+                ProviderCraft recorded = currentProviderCrafts.get(provider);
+                if (recorded != null
+                        && containsPatternOutput(patterns, recorded.outputId())) {
+                    providerCraftingId = recorded.outputId();
+                }
+            } else if (provider != null) {
+                // A completed external job must not seed the next job with its old pattern.
+                currentProviderCrafts.remove(provider);
+            }
             for (IPatternDetails pattern : patterns) {
                 if (results.size() >= MAX_OUTPUTS) break;
                 GenericStack output = pattern.getPrimaryOutput();
                 if (output == null) continue;
                 AEKey key = output.what();
-                if (isCpuCraftingOutput(cs, key) || cs.isRequesting(key)) {
+                boolean currentCpuOutput = (!isMatrixSource(be) || providerBusy)
+                        && isCpuCraftingOutput(cs, key);
+                boolean requestedOutput = !isMatrixSource(be) && cs.isRequesting(key);
+                if ((providerCraftingId != null && providerCraftingId.equals(key.getId()))
+                        || (!exactPhysicalProvider && (currentCpuOutput || requestedOutput))) {
                     OutputItem item = buildOutputItem(key);
                     if (item != null) {
                         results.add(item);
@@ -878,17 +1585,32 @@ public class CraftTracker {
                 }
             }
             ResourceLocation currentCraftingId = null;
-            if (isPatternBusy(be)) {
-                ICraftingProvider provider = getCraftingProvider(be);
-                if (provider != null) {
-                    currentCraftingId = currentProviderCrafts.get(provider);
+            boolean adjacentMachineActive = be.getLevel() != null
+                    && getAdjacentActivity(be.getLevel(), be.getBlockPos()).active();
+            if (providerCraftingId != null) {
+                currentCraftingId = providerCraftingId;
+            }
+            if (currentCraftingId == null) {
+                if (!exactPhysicalProvider && (providerBusy || adjacentMachineActive)) {
+                    currentCraftingId = findCurrentCraftingId(cs, patterns);
                 }
             }
-            return results.isEmpty() && currentCraftingId == null
+            OutputInfo info = results.isEmpty() && currentCraftingId == null
                     ? null
-                    : new OutputInfo(results, currentCraftingId);
+                    : new OutputInfo(results, currentCraftingId, returnItems);
+            if (info != null || providerBusy || adjacentMachineActive || returnItems) {
+                ModLogger.debugThrottled("output.resolve." + be.getBlockPos().asLong(),
+                        CTConfig.debugLogIntervalTicks,
+                        "Output resolution pos={} source={} patterns={} returnItems={} providerBusy={} adjacentActive={} currentId={} outputs={}",
+                        be.getBlockPos(), be.getClass().getName(), patterns.size(), returnItems,
+                        providerBusy, adjacentMachineActive, currentCraftingId, outputSummary(info));
+            }
+            return info;
         } catch (Exception e) {
-            LOGGER.info("getOutputInfo: exception at {}: {}", be.getBlockPos(), e.getMessage());
+            ModLogger.debugThrottled("output.error." + be.getBlockPos().asLong(),
+                    CTConfig.debugLogIntervalTicks,
+                    "Output resolution failed pos={} source={} error={}",
+                    be.getBlockPos(), be.getClass().getName(), e.toString());
         }
         return null;
     }
@@ -951,6 +1673,80 @@ public class CraftTracker {
         return false;
     }
 
+    private static @Nullable ResourceLocation findCurrentCraftingId(
+            ICraftingService cs, List<IPatternDetails> patterns) {
+        try {
+            for (ICraftingCPU cpu : cs.getCpus()) {
+                if (!cpu.isBusy()) continue;
+                ResourceLocation trackedOutput = currentCpuCrafts.get(cpu);
+                if (trackedOutput != null && containsPatternOutput(patterns, trackedOutput)) {
+                    return trackedOutput;
+                }
+                CraftingJobStatus status = cpu.getJobStatus();
+                if (status == null || status.crafting() == null) continue;
+                AEKey currentKey = status.crafting().what();
+                for (IPatternDetails pattern : patterns) {
+                    GenericStack output = pattern.getPrimaryOutput();
+                    if (output != null && sameKey(output.what(), currentKey)) {
+                        return currentKey.getId();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.info("findCurrentCraftingId: exception: {}", e.getMessage());
+        }
+        return null;
+    }
+
+    private static @Nullable ProviderCraft getTrinityCoreCraft(BlockEntity core) {
+        Object coreId = invokeNoArg(core, "coreId");
+        if (coreId instanceof UUID id) {
+            ProviderCraft recorded = currentTrinityCoreCrafts.get(id);
+            if (recorded != null) return recorded;
+        }
+        if (!invokeBoolean(core, "hasWork")) return null;
+
+        Object slots = invokeNoArg(core, "occupiedPatternSlots");
+        if (!(slots instanceof Iterable<?> iterable)) return null;
+        for (Object value : iterable) {
+            if (!(value instanceof Number number)) continue;
+            Object details = invokeInt(core, "decodedPattern", number.intValue());
+            if (details instanceof IPatternDetails pattern) {
+                GenericStack output = pattern.getPrimaryOutput();
+                if (output != null && output.what() != null) {
+                    return new ProviderCraft(output.what().getId(), null);
+                }
+            }
+        }
+        return null;
+    }
+
+    private static OutputItem buildOutputItem(ResourceLocation id) {
+        if (BuiltInRegistries.ITEM.containsKey(id)) return new OutputItem(id, TYPE_ITEM);
+        if (BuiltInRegistries.FLUID.containsKey(id)) return new OutputItem(id, TYPE_FLUID);
+        return new OutputItem(id, TYPE_OTHER);
+    }
+
+    private static boolean containsPatternOutput(List<IPatternDetails> patterns, ResourceLocation outputId) {
+        for (IPatternDetails pattern : patterns) {
+            GenericStack output = pattern.getPrimaryOutput();
+            if (output != null && output.what() != null && output.what().getId().equals(outputId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static @Nullable GenericStackInv getReturnInventory(BlockEntity be) {
+        if (be instanceof PatternProviderLogicHost host) {
+            return host.getLogic().getReturnInv();
+        }
+        if (be instanceof AdvPatternProviderLogicHost host) {
+            return host.getLogic().getReturnInv();
+        }
+        return null;
+    }
+
     private static boolean sameKey(AEKey first, AEKey second) {
         return first.equals(second) || first.getId().equals(second.getId());
     }
@@ -987,6 +1783,8 @@ public class CraftTracker {
         long cooldownUntilMs;
         boolean tentative;
         boolean stuck;
+        @Nullable String sourceClass;
+        @Nullable CraftStatus lastSentStatus;
         @Nullable List<OutputItem> outputs;
         @Nullable ResourceLocation currentCraftingId;
 
@@ -995,9 +1793,134 @@ public class CraftTracker {
         }
     }
 
-    private record OutputInfo(List<OutputItem> outputs, @Nullable ResourceLocation currentCraftingId) {
+    private record OutputInfo(List<OutputItem> outputs, @Nullable ResourceLocation currentCraftingId,
+                              boolean returnItems) {
         private boolean isEmpty() {
-            return outputs.isEmpty() && currentCraftingId == null;
+            return outputs.isEmpty() && currentCraftingId == null && !returnItems;
+        }
+    }
+
+    private static void clearTransientTrackingState() {
+        entries.clear();
+        prevProviderBusy.clear();
+        currentProviderCrafts.clear();
+        currentEcoBusCrafts.clear();
+        ecoThreadBusPositions.clear();
+        ecoThreadProgress.clear();
+        ecoBusHandoffUntilMs.clear();
+        currentMatrixPatternCrafts.clear();
+        matrixPatternHandoffs.clear();
+        currentTrinityCoreCrafts.clear();
+        currentCpuCrafts.clear();
+        ecoBusDispatches.remove();
+        matrixPatternDispatches.remove();
+        scanCounter = 0;
+    }
+
+    private static boolean shouldSendHighlightSnapshot(
+            UUID playerId, List<HighlightEntry> snapshot, int runtimeRemaining, long gameTime) {
+        List<HighlightEntry> previousSnapshot = lastHighlightSnapshots.get(playerId);
+        Integer previousRuntime = lastHighlightRuntimeStates.get(playerId);
+        long previousRevision = lastHighlightSnapshotRevisions.getOrDefault(playerId, Long.MIN_VALUE);
+        long lastPacketTick = lastHighlightPacketTicks.getOrDefault(playerId, Long.MIN_VALUE);
+
+        boolean snapshotChanged = !snapshot.equals(previousSnapshot);
+        boolean executionChanged = previousRevision != highlightSnapshotRevision;
+        boolean runtimeModeChanged = previousRuntime == null
+                || (runtimeRemaining > 0) != (previousRuntime > 0)
+                || (runtimeRemaining == Integer.MAX_VALUE) != (previousRuntime == Integer.MAX_VALUE);
+        boolean heartbeatDue = lastPacketTick == Long.MIN_VALUE
+                || gameTime - lastPacketTick >= HIGHLIGHT_HEARTBEAT_TICKS;
+        if (!snapshotChanged && !executionChanged && !runtimeModeChanged && !heartbeatDue) return false;
+
+        lastHighlightSnapshots.put(playerId, List.copyOf(snapshot));
+        lastHighlightRuntimeStates.put(playerId, runtimeRemaining);
+        lastHighlightPacketTicks.put(playerId, gameTime);
+        lastHighlightSnapshotRevisions.put(playerId, highlightSnapshotRevision);
+        return true;
+    }
+
+    private static void markHighlightStateChanged() {
+        highlightSnapshotRevision++;
+    }
+
+    /** Records the pattern that ECO actually accepted, including its fast-path execution. */
+    public static void recordCpuPatternPush(@Nullable ICraftingCPU cpu, Object execution) {
+        if (cpu == null || execution == null) return;
+        try {
+            Object outputs = execution.getClass().getMethod("expectedOutputs").invoke(execution);
+            if (!(outputs instanceof List<?> list)) return;
+            for (Object value : list) {
+                if (value instanceof GenericStack stack && stack.what() != null) {
+                    currentCpuCrafts.put(cpu, stack.what().getId());
+                    return;
+                }
+            }
+        } catch (ReflectiveOperationException ignored) {
+            // ECO is optional and this method is intentionally accessed without a compile dependency.
+        }
+    }
+
+    public static void clearCpuPattern(@Nullable ICraftingCPU cpu) {
+        if (cpu != null) currentCpuCrafts.remove(cpu);
+    }
+
+    /** Clears provider records belonging to a Trinity job when its CPU reaches a terminal state. */
+    public static void clearProviderJob(Object cpuLogic) {
+        if (cpuLogic == null) return;
+        try {
+            Object job = readField(cpuLogic, "job");
+            if (job == null) return;
+            Object link = readField(job, "link");
+            if (link == null) return;
+            Object craftingId = link.getClass().getMethod("getCraftingID").invoke(link);
+            if (!(craftingId instanceof UUID jobId)) return;
+            synchronized (currentProviderCrafts) {
+                currentProviderCrafts.entrySet().removeIf(entry -> jobId.equals(entry.getValue().jobId()));
+            }
+            currentEcoBusCrafts.values().forEach(executions ->
+                    executions.entrySet().removeIf(entry -> jobId.equals(entry.getValue().jobId())));
+            currentEcoBusCrafts.entrySet().removeIf(entry -> entry.getValue().isEmpty());
+            ecoThreadBusPositions.entrySet().removeIf(entry -> {
+                Map<Object, ProviderCraft> executions = currentEcoBusCrafts.get(entry.getValue());
+                return executions == null || !executions.containsKey(entry.getKey());
+            });
+            currentTrinityCoreCrafts.entrySet().removeIf(entry -> jobId.equals(entry.getValue().jobId()));
+        } catch (ReflectiveOperationException ignored) {
+            // DataEnergistics is optional and its job internals are intentionally accessed reflectively.
+        }
+    }
+
+    public static void clearTrinityJob(Object cpuLogic) {
+        clearProviderJob(cpuLogic);
+    }
+
+    private static Object readField(Object target, String fieldName) throws ReflectiveOperationException {
+        if (target == null) return null;
+        Class<?> type = target.getClass();
+        while (type != null) {
+            try {
+                var field = type.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                return field.get(target);
+            } catch (NoSuchFieldException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        throw new NoSuchFieldException(fieldName);
+    }
+
+    private static void recordTrinityCorePattern(IPatternDetails details, @Nullable UUID jobId) {
+        try {
+            Object route = details.getClass().getMethod("route").invoke(details);
+            Object coreId = route.getClass().getMethod("coreId").invoke(route);
+            GenericStack output = details.getPrimaryOutput();
+            if (coreId instanceof UUID id && output != null && output.what() != null) {
+                currentTrinityCoreCrafts.put(id, new ProviderCraft(output.what().getId(), jobId));
+                markHighlightStateChanged();
+            }
+        } catch (ReflectiveOperationException ignored) {
+            // Only DataEnergistics routed patterns expose a physical Trinity pattern-core identity.
         }
     }
 }

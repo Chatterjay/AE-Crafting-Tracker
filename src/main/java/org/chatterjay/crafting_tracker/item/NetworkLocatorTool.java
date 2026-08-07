@@ -17,10 +17,14 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Item.TooltipContext;
+import net.minecraft.world.item.TooltipFlag;
 import net.minecraft.world.item.component.CustomData;
 import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
+
+import org.chatterjay.crafting_tracker.util.ModLogger;
 
 import appeng.api.networking.IGridNode;
 import appeng.api.networking.IInWorldGridNodeHost;
@@ -41,6 +45,14 @@ public class NetworkLocatorTool extends Item {
         super(properties.stacksTo(1));
     }
 
+    @Override
+    public void appendHoverText(ItemStack stack, TooltipContext context,
+                                List<Component> tooltipComponents, TooltipFlag tooltipFlag) {
+        tooltipComponents.add(Component.translatable("tooltip.crafting_tracker.network_locator.bind"));
+        tooltipComponents.add(Component.translatable("tooltip.crafting_tracker.network_locator.filter"));
+        tooltipComponents.add(Component.translatable("tooltip.crafting_tracker.network_locator.id"));
+    }
+
     // --- Interaction ---
 
     @Override
@@ -56,17 +68,23 @@ public class NetworkLocatorTool extends Item {
 
         BlockEntity be = level.getBlockEntity(pos);
         if (!(be instanceof IInWorldGridNodeHost host)) {
+            ModLogger.debug("Locator bind failed player={} pos={} reason=not_ae_host",
+                    player.getGameProfile().getName(), pos);
             player.sendSystemMessage(Component.translatable("msg.crafting_tracker.locator.not_ae"));
             return InteractionResult.FAIL;
         }
 
         IGridNode node = findNode(host);
         if (node == null || node.getGrid() == null) {
+            ModLogger.debug("Locator bind failed player={} pos={} reason=no_grid",
+                    player.getGameProfile().getName(), pos);
             player.sendSystemMessage(Component.translatable("msg.crafting_tracker.locator.not_ae"));
             return InteractionResult.FAIL;
         }
 
         bind(stack, pos, level.dimension().location());
+        ModLogger.debug("Locator bound player={} pos={} dimension={}",
+                player.getGameProfile().getName(), pos, level.dimension().location());
         player.sendSystemMessage(Component.translatable("msg.crafting_tracker.locator.bound", pos.toShortString()));
         return InteractionResult.SUCCESS;
     }
@@ -76,6 +94,8 @@ public class NetworkLocatorTool extends Item {
         ItemStack stack = player.getItemInHand(hand);
 
         if (!level.isClientSide) {
+            ModLogger.debug("Locator configuration menu opened player={} hand={}",
+                    player.getGameProfile().getName(), hand);
             player.openMenu(new MenuProvider() {
                 @Override
                 public Component getDisplayName() {

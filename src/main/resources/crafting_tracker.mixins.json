@@ -11,7 +11,13 @@
     "CraftingServiceCpuPriorityMixin",
     "CraftingStatusMenuCpuPriorityMixin",
     "ECOCraftingCPULogicCpuPriorityMixin",
+    "ECOCraftingPatternBusHighlightMixin",
+    "ECOCraftingThreadHighlightMixin",
+    "ExtendedAeMatrixPatternHighlightMixin",
+    "ExtendedAeMatrixCrafterHighlightMixin",
+    "ExtendedAeMatrixWorkerHighlightMixin",
     "QuantumComputerMenuCpuPriorityMixin",
+    "TrinityCraftingDispatchCommitterHighlightMixin",
     "TrinityDataCoreCpuLogicCpuPriorityMixin"
   ],
   "client": [

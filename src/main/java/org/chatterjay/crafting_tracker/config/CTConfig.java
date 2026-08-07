@@ -120,7 +120,7 @@ public final class CTConfig {
         DEBUG_LOG_INTERVAL_TICKS = BUILDER
                 .comment("Minimum ticks between repeated tracking debug logs for the same provider.")
                 .translation(Crafting_tracker.MODID + ".config.diagnostics.debugLogIntervalTicks")
-                .defineInRange("debugLogIntervalTicks", 20, 1, 200);
+                .defineInRange("debugLogIntervalTicks", 100, 20, 1200);
 
         BUILDER.pop();
         BUILDER.push("ae_cpu_priority");
@@ -196,7 +196,7 @@ public final class CTConfig {
         validateInt(BADGE_BACKGROUND_ALPHA, "appearance.opacity.badgeBackground", 30, 0, 255);
         validateInt(BADGE_ACCENT_ALPHA, "appearance.opacity.badgeAccent", 80, 0, 255);
         validateInt(OUTLINE_ALPHA, "appearance.opacity.outline", 255, 0, 255);
-        validateInt(DEBUG_LOG_INTERVAL_TICKS, "diagnostics.debugLogIntervalTicks", 20, 1, 200);
+        validateInt(DEBUG_LOG_INTERVAL_TICKS, "diagnostics.debugLogIntervalTicks", 100, 20, 1200);
         refreshCache();
     }
 

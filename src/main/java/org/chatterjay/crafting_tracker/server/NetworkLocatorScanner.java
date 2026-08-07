@@ -13,7 +13,8 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.neoforged.neoforge.capabilities.Capabilities;
 
 import org.chatterjay.crafting_tracker.network.payloads.S2CLocatorHighlights.LocatorHit;
-
+import org.chatterjay.crafting_tracker.config.CTConfig;
+import org.chatterjay.crafting_tracker.util.ModLogger;
 import appeng.api.crafting.IPatternDetails;
 import appeng.helpers.InterfaceLogicHost;
 import appeng.api.networking.IGrid;
@@ -48,6 +49,14 @@ public class NetworkLocatorScanner {
 
     private static final int TYPE_ITEM = 0;
     private static final int TYPE_CHEMICAL = 3;
+    private static final String ECO_PATTERN_BUS_CLASS =
+            "cn.dancingsnow.neoecoae.blocks.entity.crafting.ECOCraftingPatternBusBlockEntity";
+    private static final String TRINITY_DATA_CORE_CLASS =
+            "com.fish_dan_.data_energistics.blockentity.TrinityDataCoreBlockEntity";
+    private static final String TRINITY_ACCESS_HATCH_CLASS =
+            "com.fish_dan_.data_energistics.blockentity.TrinityAccessHatchBlockEntity";
+    private static final String TRINITY_PATTERN_CORE_CLASS =
+            "com.fish_dan_.data_energistics.blockentity.TrinityPatternCoreBlockEntity";
     /** Max distinct icon slots per position */
     private static final int MAX_HITS_PER_POS = 3;
 
@@ -65,20 +74,42 @@ public class NetworkLocatorScanner {
             ItemStack stack = filterContainer.getItem(i);
             if (!stack.isEmpty()) filters.add(stack);
         }
-        if (filters.isEmpty()) return results;
+        String filterSummary = filterSummary(filters);
+        if (filters.isEmpty()) {
+            ModLogger.debugThrottled("locator.scan.empty." + boundPos.asLong(), CTConfig.debugLogIntervalTicks,
+                    "Locator scan skipped bound={} player={} reason=no_filters",
+                    boundPos, player.getGameProfile().getName());
+            return results;
+        }
+
+        ModLogger.debugThrottled("locator.scan.start." + boundPos.asLong(), CTConfig.debugLogIntervalTicks,
+                "Locator scan start bound={} player={} filters={}",
+                boundPos, player.getGameProfile().getName(), filterSummary);
 
         // Get grid from bound position
         BlockEntity boundBe = level.getBlockEntity(boundPos);
-        if (!(boundBe instanceof IInWorldGridNodeHost host)) return results;
+        if (!(boundBe instanceof IInWorldGridNodeHost host)) {
+            ModLogger.debugThrottled("locator.scan.no_host." + boundPos.asLong(), CTConfig.debugLogIntervalTicks,
+                    "Locator scan skipped bound={} reason=not_ae_host", boundPos);
+            return results;
+        }
 
         IGrid grid = getGrid(host);
-        if (grid == null) return results;
+        if (grid == null) {
+            ModLogger.debugThrottled("locator.scan.no_grid." + boundPos.asLong(), CTConfig.debugLogIntervalTicks,
+                    "Locator scan skipped bound={} reason=no_grid", boundPos);
+            return results;
+        }
 
         // Iterate ALL grid nodes and get owners (both BlockEntities and cable-attached parts)
         Set<BlockPos> visitedPos = new HashSet<>();
         Set<Object> visitedOwners = Collections.newSetFromMap(new IdentityHashMap<>());
-
+        int nodeCount = 0;
+        int blockEntityCount = 0;
+        int partCount = 0;
+        int matchedOwnerCount = 0;
         for (IGridNode node : grid.getNodes()) {
+            nodeCount++;
             Object owner = node.getOwner();
 
             BlockPos pos = null;
@@ -86,7 +117,18 @@ public class NetworkLocatorScanner {
             Set<ResourceLocation> foundTypes = new HashSet<>();
 
             if (owner instanceof BlockEntity be) {
+                blockEntityCount++;
                 if (be.isRemoved()) continue;
+
+                if (isTrinityDataCore(be)) {
+                    scanTrinityDataCore(be, filters, results);
+                    continue;
+                }
+                if (isTrinityAccessHatch(be)) {
+                    scanTrinityAccessHatch(be, filters, results);
+                    continue;
+                }
+
                 pos = be.getBlockPos();
                 if (!visitedPos.add(pos)) continue;
 
@@ -98,14 +140,17 @@ public class NetworkLocatorScanner {
                     checkPatterns(owner, filters, foundItems, foundTypes);
                 }
             } else if (owner instanceof StorageBusPart bus) {
+                partCount++;
                 pos = getPartPos(bus);
                 if (pos == null || !visitedOwners.add(owner)) continue;
                 checkStorageBus(level, bus, filters, foundItems, foundTypes);
             } else if (owner instanceof IOBusPart bus) {
+                partCount++;
                 pos = getPartPos(bus);
                 if (pos == null || !visitedOwners.add(owner)) continue;
                 checkIOBusConfig(bus, filters, foundItems, foundTypes);
             } else if (owner instanceof AEBasePart part) {
+                partCount++;
                 pos = getPartPos(part);
                 if (pos == null || !visitedOwners.add(owner)) continue;
                 checkPatterns(owner, filters, foundItems, foundTypes);
@@ -119,9 +164,17 @@ public class NetworkLocatorScanner {
 
             if (pos != null && !foundItems.isEmpty()) {
                 results.put(pos.immutable(), foundItems);
+                matchedOwnerCount++;
+                ModLogger.debugThrottled("locator.hit." + boundPos.asLong() + "." + pos.asLong(), CTConfig.debugLogIntervalTicks,
+                        "Locator hit bound={} pos={} owner={} hits={}",
+                        boundPos, pos, owner == null ? "null" : owner.getClass().getName(), hitSummary(foundItems));
             }
         }
 
+        ModLogger.debugThrottled("locator.scan.finish." + boundPos.asLong(), CTConfig.debugLogIntervalTicks,
+                "Locator scan finish bound={} nodes={} blockEntities={} parts={} visitedBlocks={} visitedParts={} matchedOwners={} results={} filters={}",
+                boundPos, nodeCount, blockEntityCount, partCount, visitedPos.size(), visitedOwners.size(),
+                matchedOwnerCount, results.size(), filterSummary);
         return results;
     }
 
@@ -155,6 +208,11 @@ public class NetworkLocatorScanner {
 
     private static void checkPatterns(Object owner, List<ItemStack> filters, List<LocatorHit> foundItems, Set<ResourceLocation> foundTypes) {
         List<IPatternDetails> patterns = getPatterns(owner);
+        checkPatternList(patterns, filters, foundItems, foundTypes);
+    }
+
+    private static void checkPatternList(List<IPatternDetails> patterns, List<ItemStack> filters,
+                                         List<LocatorHit> foundItems, Set<ResourceLocation> foundTypes) {
         if (patterns.isEmpty()) return;
 
         for (IPatternDetails pattern : patterns) {
@@ -176,7 +234,201 @@ public class NetworkLocatorScanner {
         if (owner instanceof PatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
         if (owner instanceof TileAssemblerMatrixPattern matrix) return matrix.getAvailablePatterns();
         if (owner instanceof AdvPatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
+        if (isEcoPatternBus(owner)) {
+            return invokePatternList(owner, "getLocalAvailablePatterns");
+        }
+        if (isTrinityPatternCore(owner)) {
+            return getTrinityCorePatterns(owner);
+        }
         return List.of();
+    }
+
+    private static boolean isEcoPatternBus(Object owner) {
+        return owner != null && owner.getClass().getName().equals(ECO_PATTERN_BUS_CLASS);
+    }
+
+    private static boolean isTrinityDataCore(Object owner) {
+        return owner != null && owner.getClass().getName().equals(TRINITY_DATA_CORE_CLASS);
+    }
+
+    private static boolean isTrinityAccessHatch(Object owner) {
+        return owner != null && owner.getClass().getName().equals(TRINITY_ACCESS_HATCH_CLASS);
+    }
+
+    private static boolean isTrinityPatternCore(Object owner) {
+        return owner != null && owner.getClass().getName().equals(TRINITY_PATTERN_CORE_CLASS);
+    }
+
+    private static List<IPatternDetails> invokePatternList(Object owner, String methodName) {
+        try {
+            Object value = owner.getClass().getMethod(methodName).invoke(owner);
+            if (!(value instanceof List<?> list)) return List.of();
+            List<IPatternDetails> patterns = new ArrayList<>();
+            for (Object pattern : list) {
+                if (pattern instanceof IPatternDetails details) patterns.add(details);
+            }
+            return patterns;
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            return List.of();
+        }
+    }
+
+    private static List<IPatternDetails> getTrinityCorePatterns(Object core) {
+        try {
+            List<IPatternDetails> patterns = new ArrayList<>();
+            var decodedPattern = core.getClass().getMethod("decodedPattern", int.class);
+            Object occupied = core.getClass().getMethod("occupiedPatternSlots").invoke(core);
+            if (occupied instanceof Iterable<?> slots) {
+                for (Object value : slots) {
+                    if (!(value instanceof Number number)) continue;
+                    Object pattern = decodedPattern.invoke(core, number.intValue());
+                    if (pattern instanceof IPatternDetails details) patterns.add(details);
+                }
+                return patterns;
+            }
+
+            Object capacity = core.getClass().getMethod("patternCapacity").invoke(core);
+            if (!(capacity instanceof Number number)) return List.of();
+            int count = Math.max(0, Math.min(number.intValue(), 512));
+            for (int slot = 0; slot < count; slot++) {
+                Object pattern = decodedPattern.invoke(core, slot);
+                if (pattern instanceof IPatternDetails details) patterns.add(details);
+            }
+            return patterns;
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            return List.of();
+        }
+    }
+
+    /**
+     * DataE publishes patterns through its aggregate catalog rather than the
+     * normal AE provider API. Highlight the data core itself when a catalog
+     * pattern matches; mapping a virtual pattern back to a child core is not
+     * required for locator use and is unreliable while the layout is changing.
+     */
+    private static void scanTrinityDataCore(
+            BlockEntity dataCore, List<ItemStack> filters,
+            Map<BlockPos, List<LocatorHit>> results) {
+        scanTrinityCatalog(dataCore, dataCore, filters, results, "dataCore");
+    }
+
+    /**
+     * The access hatch is the AE2 grid owner for DataE's crafting provider. Its
+     * pattern provider is backed by the bound data core, so report the core as
+     * the locator position instead of the hatch position.
+     */
+    private static void scanTrinityAccessHatch(
+            BlockEntity accessHatch, List<ItemStack> filters,
+            Map<BlockPos, List<LocatorHit>> results) {
+        try {
+            Object dataCore = invokeNoArg(accessHatch, "patternProviderHost");
+            if (!(dataCore instanceof BlockEntity)) {
+                // Older DataE builds may not expose the provider-specific host
+                // resolver, but their binding resolver still identifies the core.
+                dataCore = invokeNoArg(accessHatch, "boundHost");
+            }
+            if (!(dataCore instanceof BlockEntity)) {
+                ModLogger.debugThrottled("locator.trinity.hatch.unresolved." + accessHatch.getBlockPos().asLong(),
+                        CTConfig.debugLogIntervalTicks,
+                        "Locator DataE access hatch host unresolved hatch={} value={} methods=patternProviderHost,boundHost",
+                        accessHatch.getBlockPos(), dataCore == null ? "null" : dataCore.getClass().getName());
+                return;
+            }
+            scanTrinityCatalog(accessHatch, (BlockEntity) dataCore, filters, results, "accessHatch");
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            ModLogger.debugThrottled("locator.trinity.hatch.error." + accessHatch.getBlockPos().asLong(),
+                    CTConfig.debugLogIntervalTicks,
+                    "Locator DataE access hatch host resolution failed hatch={} error={}",
+                    accessHatch.getBlockPos(), e.toString());
+        }
+    }
+
+    private static void scanTrinityCatalog(
+            BlockEntity source, BlockEntity dataCore, List<ItemStack> filters,
+            Map<BlockPos, List<LocatorHit>> results, String sourceType) {
+        try {
+            var catalogField = findField(dataCore.getClass(), "patternCatalog");
+            Object catalog;
+            if (catalogField != null) {
+                catalogField.setAccessible(true);
+                catalog = catalogField.get(dataCore);
+            } else {
+                // Keep compatibility with builds that only expose the catalog
+                // through the generated getter.
+                catalog = invokeNoArg(dataCore, "getPatternCatalog");
+            }
+            if (catalog == null) return;
+            List<IPatternDetails> patterns = invokePatternList(catalog, "getAvailablePatterns");
+            if (patterns.isEmpty()) {
+                // Fall back to physical cores for older DataE builds that do
+                // not expose the aggregate list on the catalog interface.
+                Object mountsValue = catalog.getClass().getMethod("mountedCores").invoke(catalog);
+                if (mountsValue instanceof Iterable<?> mounts) {
+                    patterns = new ArrayList<>();
+                    for (Object mount : mounts) {
+                        Object core = mount.getClass().getMethod("core").invoke(mount);
+                        if (isTrinityPatternCore(core)) patterns.addAll(getTrinityCorePatterns(core));
+                    }
+                }
+            }
+
+            List<LocatorHit> hits = new ArrayList<>();
+            Set<ResourceLocation> types = new HashSet<>();
+            checkPatternList(patterns, filters, hits, types);
+            if (!hits.isEmpty()) {
+                BlockPos dataCorePos = dataCore.getBlockPos().immutable();
+                results.merge(dataCorePos, hits, NetworkLocatorScanner::mergeHits);
+                ModLogger.debugThrottled("locator.trinity.hit." + dataCorePos.asLong(),
+                        CTConfig.debugLogIntervalTicks,
+                        "Locator DataE hit sourceType={} source={} dataCore={} patterns={} hits={}",
+                        sourceType, source.getBlockPos(), dataCorePos, patterns.size(), hitSummary(hits));
+            }
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            ModLogger.debugThrottled("locator.trinity.error." + source.getBlockPos().asLong(),
+                    CTConfig.debugLogIntervalTicks,
+                    "Locator DataE scan failed sourceType={} source={} dataCore={} error={}",
+                    sourceType, source.getBlockPos(), dataCore.getBlockPos(), e.toString());
+        }
+    }
+
+    private static Object invokeNoArg(Object target, String methodName) throws ReflectiveOperationException {
+        var method = findMethod(target.getClass(), methodName);
+        if (method == null) return null;
+        method.setAccessible(true);
+        return method.invoke(target);
+    }
+
+    private static java.lang.reflect.Method findMethod(Class<?> type, String name) {
+        while (type != null) {
+            try {
+                return type.getDeclaredMethod(name);
+            } catch (NoSuchMethodException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        return null;
+    }
+
+    private static List<LocatorHit> mergeHits(List<LocatorHit> first, List<LocatorHit> second) {
+        List<LocatorHit> merged = new ArrayList<>(first);
+        Set<ResourceLocation> types = new HashSet<>();
+        for (LocatorHit hit : merged) types.add(hit.itemId());
+        for (LocatorHit hit : second) {
+            if (merged.size() >= MAX_HITS_PER_POS || !types.add(hit.itemId())) continue;
+            merged.add(hit);
+        }
+        return merged;
+    }
+
+    private static java.lang.reflect.Field findField(Class<?> type, String name) {
+        while (type != null) {
+            try {
+                return type.getDeclaredField(name);
+            } catch (NoSuchFieldException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        return null;
     }
 
     private static boolean keyMatchesFilter(AEKey key, ItemStack filter) {
@@ -189,6 +441,24 @@ public class NetworkLocatorScanner {
     private static LocatorHit buildHit(ItemStack stack) {
         ResourceLocation id = BuiltInRegistries.ITEM.getKey(stack.getItem());
         return new LocatorHit(id, TYPE_ITEM);
+    }
+
+    private static String filterSummary(List<ItemStack> filters) {
+        StringBuilder summary = new StringBuilder();
+        for (ItemStack filter : filters) {
+            if (!summary.isEmpty()) summary.append(',');
+            summary.append(BuiltInRegistries.ITEM.getKey(filter.getItem()));
+        }
+        return summary.toString();
+    }
+
+    private static String hitSummary(List<LocatorHit> hits) {
+        StringBuilder summary = new StringBuilder();
+        for (LocatorHit hit : hits) {
+            if (!summary.isEmpty()) summary.append(',');
+            summary.append(hit.itemId()).append('#').append(hit.outputType());
+        }
+        return summary.toString();
     }
 
     /**

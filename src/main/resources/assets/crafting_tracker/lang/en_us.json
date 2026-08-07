@@ -5,6 +5,9 @@
   "chat.crafting_tracker.status_disabled": "Crafting tracker: disabled",
 
   "item.crafting_tracker.network_locator": "Network Locator",
+  "tooltip.crafting_tracker.network_locator.bind": "Sneak + right-click an AE network block to bind",
+  "tooltip.crafting_tracker.network_locator.filter": "Right-click in air to configure item filters",
+  "tooltip.crafting_tracker.network_locator.id": "Sneak while highlighting to show item IDs",
   "msg.crafting_tracker.locator.bound": "Bound to AE network at %s",
   "msg.crafting_tracker.locator.bound_to": "Bound to AE network at %s",
   "msg.crafting_tracker.locator.not_bound": "Not bound to any AE network",
@@ -76,7 +79,7 @@
   "crafting_tracker.config.diagnostics.debugTracking": "Tracking Diagnostics",
   "crafting_tracker.config.diagnostics.debugTracking.tooltip": "Log detailed provider state transitions for diagnosing flicker or missing status updates",
   "crafting_tracker.config.diagnostics.debugLogIntervalTicks": "Debug Log Interval (ticks)",
-  "crafting_tracker.config.diagnostics.debugLogIntervalTicks.tooltip": "Minimum ticks between repeated tracking debug logs for the same provider",
+  "crafting_tracker.config.diagnostics.debugLogIntervalTicks.tooltip": "Minimum interval for repeated diagnostics; default 100 ticks (5 seconds)",
 
   "crafting_tracker.tooltip.ae_cpu_priority.right_click": "Right-click to promote dispatch priority",
   "crafting_tracker.tooltip.ae_cpu_priority.shift_right_click": "Shift-right-click to lower dispatch priority",

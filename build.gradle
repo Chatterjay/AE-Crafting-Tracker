@@ -148,6 +148,17 @@ var generateModMetadata = tasks.register("generateModMetadata", ProcessResources
 sourceSets.main.resources.srcDir generateModMetadata
 neoForge.ideSyncTask generateModMetadata
 
+// ModDevGradle 2.0.141 can retain an UP-TO-DATE result for this generated
+// file after build/ is removed. Declare the output explicitly so Gradle
+// reruns the producer before validating PrepareRun's input.
+tasks.named('writeClientLegacyClasspath') {
+    outputs.file(layout.buildDirectory.file('moddev/clientLegacyClasspath.txt'))
+}
+
+tasks.named('prepareClientRun') {
+    dependsOn(tasks.named('writeClientLegacyClasspath'))
+}
+
 publishing {
     publications {
         register('mavenJava', MavenPublication) {

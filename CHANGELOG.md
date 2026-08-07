@@ -10,6 +10,15 @@
 
 - 兼容 DataEnergistics 三位一体数据化核心的虚拟 CPU，让 AE CPU 优先级可以参与其分区调度、供应器占用和任务生命周期管理。
 - 兼容 Neo ECO AE Extension 的 ECO 可扩展计算子系统主机 CPU，让 AE CPU 优先级可以参与其 CPU 调度、供应器占用和任务生命周期管理。
+- 供应器高亮兼容 ExtendedAE 装配矩阵及 ExtendedAE Plus 扩展核心、Neo ECO AE Extension FD 样板总线和 DataEnergistics 三位一体数据化核心。
+- 网络定位器兼容 Neo ECO AE Extension FD 样板总线和 DataEnergistics 三位一体数据化核心。
+
+### 修复
+
+- 修复短时矩阵批次在同步前结束，导致装配矩阵无法高亮的问题。
+- 修复相同内容二次下单后高亮快照不立即刷新的问题。
+- 修复客户端高亮缓存更新期间可能短暂暴露空状态并产生闪烁的问题。
+- 优化诊断日志节流，减少空闲供应器和客户端渲染阶段的重复输出。
 
 ## [0.2.1] - 2026-07-27
 

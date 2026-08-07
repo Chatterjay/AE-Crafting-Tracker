@@ -11,8 +11,10 @@ import net.minecraft.world.item.ItemStack;
 import net.neoforged.neoforge.network.PacketDistributor;
 
 import org.chatterjay.crafting_tracker.item.NetworkLocatorTool;
+import org.chatterjay.crafting_tracker.config.CTConfig;
 import org.chatterjay.crafting_tracker.network.payloads.S2CCraftHighlightData;
 import org.chatterjay.crafting_tracker.network.payloads.S2CLocatorHighlights;
+import org.chatterjay.crafting_tracker.util.ModLogger;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -47,6 +49,10 @@ final class LocatorTrackingService {
         playersWithLocatorLastTick.clear();
         playersWithLocatorLastTick.addAll(currentLocatorPlayers);
 
+        ModLogger.debugThrottled("locator.service.tick", CTConfig.debugLogIntervalTicks,
+                "Locator service tick playersWithLocator={} trackedLastTick={} scanCounter={}",
+                currentLocatorPlayers.size(), playersWithLocatorLastTick.size(), tickCounter);
+
         if (tickCounter % SCAN_INTERVAL_TICKS == 0) {
             scanBoundLocators(server, gameTime);
         }
@@ -64,6 +70,8 @@ final class LocatorTrackingService {
 
         BlockPos lastPos = lastBoundPositions.get(playerId);
         if (lastPos != null && !lastPos.equals(bound.pos())) {
+            ModLogger.debug("Locator binding changed player={} from={} to={}",
+                    player.getGameProfile().getName(), lastPos, bound.pos());
             clearLocatorHighlights(player);
             performLocatorScan(server, player, locator, bound.pos(), gameTime);
         }
@@ -101,6 +109,9 @@ final class LocatorTrackingService {
         var reg = player.level().registryAccess();
         List<ItemStack> filters = NetworkLocatorTool.getFilters(locator, reg);
         if (filters.isEmpty()) {
+            ModLogger.debugThrottled("locator.empty_filters." + player.getUUID(), CTConfig.debugLogIntervalTicks,
+                    "Locator scan produced no filters player={} bound={}",
+                    player.getGameProfile().getName(), boundPos);
             sendHighlights(player, Map.of(), gameTime);
             return;
         }
@@ -112,16 +123,24 @@ final class LocatorTrackingService {
 
         Map<BlockPos, List<S2CLocatorHighlights.LocatorHit>> results =
                 NetworkLocatorScanner.scan((ServerLevel) player.level(), boundPos, filterContainer, player);
+        ModLogger.debugThrottled("locator.result." + player.getUUID(), CTConfig.debugLogIntervalTicks,
+                "Locator result player={} bound={} matchedBlocks={} matchedHits={}",
+                player.getGameProfile().getName(), boundPos, results.size(),
+                results.values().stream().mapToInt(List::size).sum());
         sendHighlights(player, results, gameTime);
     }
 
     private void sendHighlights(ServerPlayer player, Map<BlockPos, List<S2CLocatorHighlights.LocatorHit>> results,
                                 long gameTime) {
         int runtimeRemaining = CraftTracker.getRuntimeRemainingTicks(player.getUUID(), gameTime);
+        ModLogger.debugThrottled("locator.packet." + player.getUUID(), CTConfig.debugLogIntervalTicks,
+                "Sending locator highlight packet player={} blocks={} runtimeRemainingTicks={}",
+                player.getGameProfile().getName(), results.size(), runtimeRemaining);
         PacketDistributor.sendToPlayer(player, new S2CLocatorHighlights(results, runtimeRemaining));
     }
 
     private void clearLocatorHighlights(ServerPlayer player) {
+        ModLogger.debug("Clearing locator highlights player={}", player.getGameProfile().getName());
         PacketDistributor.sendToPlayer(player, new S2CLocatorHighlights(Map.of(), 0));
     }
 
