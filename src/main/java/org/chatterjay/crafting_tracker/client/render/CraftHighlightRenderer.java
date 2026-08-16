@@ -456,20 +456,12 @@ public class CraftHighlightRenderer {
     }
 
     /**
-     * Get the best sprite to display for a given item.
-     * For AE2-style part items (export bus, import bus, etc.), the item model
-     * is a composite of cable + part, and getParticleIcon() returns the cable
-     * texture. This method tries looking up {namespace}:part/{path} on the
-     * block atlas first, falling back to getParticleIcon().
-     * ExtendedAE/AdvancedAE register parts with a _part suffix that the
-     * texture path doesn't have, so we also try the stripped path.
-     * Some ExtendedAE textures use _base suffix (e.g. storage buses).
+     * Get the best sprite to display for an item. Part-like items may expose
+     * a dedicated block-atlas sprite; fall back to the baked model particle
+     * icon when no generic part texture exists.
      */
     private static TextureAtlasSprite getDisplaySprite(ResourceLocation itemId, BakedModel model) {
         String ns = itemId.getNamespace();
-        if (!ns.equals("ae2") && !ns.equals("extendedae") && !ns.equals("advanced_ae") && !ns.equals("appmek")) {
-            return model.getParticleIcon();
-        }
         Minecraft mc = Minecraft.getInstance();
         String path = itemId.getPath();
         if (path.endsWith("_part")) {

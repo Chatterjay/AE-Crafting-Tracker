@@ -1,13 +1,13 @@
 {
-  "chat.crafting_tracker.enabled": "Crafting tracker highlight enabled",
-  "chat.crafting_tracker.disabled": "Crafting tracker highlight disabled",
+  "chat.crafting_tracker.enabled": "Crafting tracker enabled",
+  "chat.crafting_tracker.disabled": "Crafting tracker disabled",
   "chat.crafting_tracker.status_enabled": "Crafting tracker: enabled",
   "chat.crafting_tracker.status_disabled": "Crafting tracker: disabled",
 
   "item.crafting_tracker.network_locator": "Network Locator",
   "tooltip.crafting_tracker.network_locator.bind": "Sneak + right-click an AE network block to bind",
   "tooltip.crafting_tracker.network_locator.filter": "Right-click in air to configure item filters",
-  "tooltip.crafting_tracker.network_locator.id": "Sneak while highlighting to show item IDs",
+  "tooltip.crafting_tracker.network_locator.id": "Sneak while tracking to show item IDs",
   "msg.crafting_tracker.locator.bound": "Bound to AE network at %s",
   "msg.crafting_tracker.locator.bound_to": "Bound to AE network at %s",
   "msg.crafting_tracker.locator.not_bound": "Not bound to any AE network",
@@ -17,8 +17,8 @@
   "msg.crafting_tracker.locator.locked_on": "Tool locked - position binding protected",
   "msg.crafting_tracker.locator.locked_off": "Tool unlocked",
 
-  "button.crafting_tracker.runtime_highlight.on": "Stop",
-  "button.crafting_tracker.runtime_highlight.off": "Run",
+  "button.crafting_tracker.runtime_highlight.on": "Untrack",
+  "button.crafting_tracker.runtime_highlight.off": "Track",
 
   "overlay.crafting_tracker.status.active": "Active",
   "overlay.crafting_tracker.status.stalled": "Slow",
@@ -48,7 +48,7 @@
   "crafting_tracker.configuration.diagnostics.tooltip": "Tracking diagnostics",
   "crafting_tracker.configuration.ae_cpu_priority": "AE CPU Priority",
   "crafting_tracker.configuration.ae_cpu_priority.button": "AE CPU Priority",
-  "crafting_tracker.configuration.ae_cpu_priority.tooltip": "Experimental runtime priority controls for AE crafting CPUs",
+  "crafting_tracker.configuration.ae_cpu_priority.tooltip": "Runtime priority controls for crafting CPUs",
   "crafting_tracker.configuration.section.crafting.tracker.common.toml": "Common",
   "crafting_tracker.configuration.section.crafting.tracker.common.toml.title": "Crafting Tracker",
 
@@ -81,14 +81,14 @@
   "crafting_tracker.config.diagnostics.debugLogIntervalTicks": "Debug Log Interval (ticks)",
   "crafting_tracker.config.diagnostics.debugLogIntervalTicks.tooltip": "Minimum interval for repeated diagnostics; default 100 ticks (5 seconds)",
 
-  "crafting_tracker.tooltip.ae_cpu_priority.right_click": "Right-click to promote dispatch priority",
-  "crafting_tracker.tooltip.ae_cpu_priority.shift_right_click": "Shift-right-click to lower dispatch priority",
-  "crafting_tracker.tooltip.ae_cpu_priority.level": "priority: %s",
-  "crafting_tracker.message.ae_cpu_priority.promoted_level": "AE CPU priority promoted: %s",
-  "crafting_tracker.message.ae_cpu_priority.lowered_level": "AE CPU priority lowered: %s",
-  "crafting_tracker.message.ae_cpu_priority.cleared": "AE CPU priority cleared",
+  "crafting_tracker.tooltip.ae_cpu_priority.right_click": "Right-click: raise priority",
+  "crafting_tracker.tooltip.ae_cpu_priority.shift_right_click": "Shift + right-click: lower priority",
+  "crafting_tracker.tooltip.ae_cpu_priority.level": "Priority: %s",
+  "crafting_tracker.message.ae_cpu_priority.promoted_level": "Priority raised: %s",
+  "crafting_tracker.message.ae_cpu_priority.lowered_level": "Priority lowered: %s",
+  "crafting_tracker.message.ae_cpu_priority.cleared": "Priority cleared",
   "crafting_tracker.config.ae_cpu_priority.enableAeCpuPriority": "AE CPU Priority",
-  "crafting_tracker.config.ae_cpu_priority.enableAeCpuPriority.tooltip": "Experimental: right-click AE crafting CPUs to promote dispatch priority. Requires Crafting Tracker on the server to affect crafting dispatch.",
+  "crafting_tracker.config.ae_cpu_priority.enableAeCpuPriority.tooltip": "Enable runtime priority controls for crafting CPUs.",
   "crafting_tracker.config.ae_cpu_priority.aeCpuPriorityNames": "AE CPU Priority Names",
-  "crafting_tracker.config.ae_cpu_priority.aeCpuPriorityNames.tooltip": "Crafting CPU names used for automatic CPU selection. Use a trailing * for prefix matching, for example Main*."
+  "crafting_tracker.config.ae_cpu_priority.aeCpuPriorityNames.tooltip": "CPU names used for automatic selection; add * for prefix matching."
 }
