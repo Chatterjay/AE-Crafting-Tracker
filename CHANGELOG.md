@@ -8,15 +8,15 @@
 
 ### 兼容性
 
-- 兼容 DataEnergistics 三位一体数据化核心的虚拟 CPU，让 AE CPU 优先级可以参与其分区调度、供应器占用和任务生命周期管理。
-- 兼容 Neo ECO AE Extension 的 ECO 可扩展计算子系统主机 CPU，让 AE CPU 优先级可以参与其 CPU 调度、供应器占用和任务生命周期管理。
+- 兼容 DataEnergistics 1.21.1-3.1.3 三位一体数据化核心的虚拟 CPU，让 AE CPU 优先级可以参与其分区调度、供应器占用和任务生命周期管理。
+- 兼容 Neo ECO AE Extension v21.1.1 的 ECO 可扩展计算子系统主机 CPU，让 AE CPU 优先级可以参与其 CPU 调度、供应器占用和任务生命周期管理。
 - 供应器高亮兼容 ExtendedAE 装配矩阵及 ExtendedAE Plus 扩展核心、Neo ECO AE Extension FD 样板总线和 DataEnergistics 三位一体数据化核心。
 - 网络定位器兼容 Neo ECO AE Extension FD 样板总线和 DataEnergistics 三位一体数据化核心。
 - 新增AE CPU 运行期优先级功能
 
 ### 修复
 
-- 修复可选兼容类被常驻代码直接引用，可能让扩展模组变成隐性硬依赖的问题；现在仅 AE2 为必需模组。
+- 修复输出总线安装合成卡后，在持续向目标机器输送材料时仍可能被误判为阻塞的问题；状态判定现在会结合实际输入传输进度和相邻机器活动，正常持续合成将保持活动状态。
 
 ## [0.2.0] - 2026-07-17
 
