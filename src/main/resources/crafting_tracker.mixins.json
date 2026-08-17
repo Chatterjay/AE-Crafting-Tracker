@@ -10,6 +10,7 @@
     "CraftingCpuLogicCpuPriorityMixin",
     "CraftingServiceCpuPriorityMixin",
     "CraftingStatusMenuCpuPriorityMixin",
+    "PatternProviderLogicProgressMixin",
     "ECOCraftingCPULogicCpuPriorityMixin",
     "ECOCraftingCPULogicLegacyCpuPriorityMixin",
     "ECOCraftingPatternBusHighlightMixin",

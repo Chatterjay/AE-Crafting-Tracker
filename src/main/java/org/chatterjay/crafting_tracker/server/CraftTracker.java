@@ -86,6 +86,8 @@ public class CraftTracker {
     private static final Set<UUID> runtimeExplicitlyDisabled = new HashSet<>();
     private static final Map<BlockPos, TrackerEntry> entries = new HashMap<>();
     private static final Map<BlockPos, Boolean> prevProviderBusy = new HashMap<>();
+    /** Last successful input transfer from an AE2 pattern provider's pending send queue. */
+    private static final Map<BlockPos, Long> providerTransferProgress = new HashMap<>();
     private static final Map<UUID, List<HighlightEntry>> lastHighlightSnapshots = new HashMap<>();
     private static final Map<UUID, Integer> lastHighlightRuntimeStates = new HashMap<>();
     private static final Map<UUID, Long> lastHighlightPacketTicks = new HashMap<>();
@@ -353,6 +355,20 @@ public class CraftTracker {
         recordProviderPatternPush(provider, patternDetails, null);
     }
 
+    /** Records that a provider's pending input queue made real forward progress. */
+    public static void recordPatternProviderTransfer(BlockEntity provider) {
+        if (provider == null || provider.getLevel() == null || provider.getLevel().isClientSide()) return;
+
+        BlockPos pos = provider.getBlockPos().immutable();
+        long now = System.currentTimeMillis();
+        providerTransferProgress.put(pos, now);
+
+        TrackerEntry entry = entries.get(pos);
+        if (entry != null && entry.busyStartMs != 0 && !entry.stuck) {
+            entry.lastBusyProgressMs = now;
+        }
+    }
+
     private static void recordProviderPatternPush(
             ICraftingProvider provider, IPatternDetails patternDetails, @Nullable UUID jobId) {
         if (provider == null || patternDetails == null) {
@@ -509,6 +525,7 @@ public class CraftTracker {
         TrackerEntry entry = entries.computeIfAbsent(patternPosition, ignored -> new TrackerEntry(0));
         long now = System.currentTimeMillis();
         entry.busyStartMs = now;
+        entry.lastBusyProgressMs = now;
         entry.activeStartMs = now;
         entry.lastOutputSeenMs = now;
         entry.lockStartMs = 0;
@@ -582,6 +599,7 @@ public class CraftTracker {
         TrackerEntry entry = entries.computeIfAbsent(dispatch.busPosition(), ignored -> new TrackerEntry(0));
         long now = System.currentTimeMillis();
         entry.busyStartMs = now;
+        entry.lastBusyProgressMs = now;
         entry.activeStartMs = now;
         entry.lastOutputSeenMs = now;
         entry.lockStartMs = 0;
@@ -787,6 +805,7 @@ public class CraftTracker {
         }
         if (progressed) {
             entry.busyStartMs = now;
+            entry.lastBusyProgressMs = now;
             entry.activeStartMs = now;
             entry.stuck = false;
             entry.cooldownUntilMs = 0;
@@ -1103,7 +1122,7 @@ public class CraftTracker {
                             TrackerEntry entry = new TrackerEntry(locked ? now : 0);
                             entry.sourceClass = be.getClass().getName();
                             entry.stuck = locked;
-                            if (busy && !locked) entry.busyStartMs = now;
+                            if (busy && !locked) beginBusyMonitoring(immPos, entry, now);
                             var info = getOutputInfo(be, null);
                             applyOutputInfo(entry, info, now);
                             entries.put(immPos, entry);
@@ -1147,7 +1166,6 @@ public class CraftTracker {
                 if (busy) {
                     boolean startedBusy = entry.busyStartMs == 0;
                     boolean wasMarkedStuck = entry.stuck;
-                    boolean wasThresholdStuck = !entry.stuck && isDurationStuck(entry, now);
 
                     entry.cooldownUntilMs = 0;
                     entry.missedCount = 0;
@@ -1159,36 +1177,53 @@ public class CraftTracker {
 
                     entry.stuck = locked;
 
-                    // Track continuous busy time for output-full detection (busy but not locked)
-                    if (!locked && entry.busyStartMs == 0) {
-                        entry.busyStartMs = now;
-                    }
                     if (locked && entry.lockStartMs == 0) {
                         entry.lockStartMs = now;
                     } else if (!locked) {
                         entry.lockStartMs = 0;
                     }
+
+                    boolean madeTransferProgress = false;
+                    AdjacentActivity adjacentActivity = AdjacentActivity.NONE;
+                    if (!locked) {
+                        // A provider can remain busy while its target keeps consuming inputs.
+                        // Only a lack of observed transfer or machine activity is a potential stall.
+                        if (startedBusy || wasMarkedStuck) {
+                            beginBusyMonitoring(pos, entry, now);
+                        }
+                        madeTransferProgress = refreshBusyTransferProgress(pos, entry);
+                        adjacentActivity = getAdjacentActivity(level, pos);
+                        if (adjacentActivity.active()) {
+                            entry.lastBusyProgressMs = now;
+                        }
+                    } else {
+                        entry.lastBusyProgressMs = 0;
+                    }
                     if (isEcoPatternBus(be) && !locked) {
                         refreshEcoProgress(pos, entry, now);
                     }
-                    if (!locked && (startedBusy || wasMarkedStuck || wasThresholdStuck)) {
+                    if (!locked && (startedBusy || wasMarkedStuck)) {
                         resetActiveTimer(entry, now);
-                        if (wasMarkedStuck || wasThresholdStuck) {
+                        if (wasMarkedStuck) {
                             debugProviderEvent("refresh.recover_busy", pos, entry, now,
                                     "busy=true locked=false startedBusy=" + startedBusy
                                             + " wasMarkedStuck=" + wasMarkedStuck
-                                            + " wasThresholdStuck=" + wasThresholdStuck
                                             + " outputInfo=" + outputSummary(info));
                         }
                     }
                     debugProviderSample("refresh.busy", pos, entry, now,
-                            "busy=true locked=" + locked + " outputInfo=" + outputSummary(info));
+                            "busy=true locked=" + locked
+                                    + " transferProgress=" + madeTransferProgress
+                                    + " adjacentActive=" + adjacentActivity.detail()
+                                    + " outputInfo=" + outputSummary(info));
                 } else {
                     if (!locked && preserveEcoHandoff(
                             be, pos, entry, now, "refresh.eco_handoff_grace")) {
                         break;
                     }
                     entry.busyStartMs = 0;
+                    entry.lastBusyProgressMs = 0;
+                    providerTransferProgress.remove(pos);
                     if (entry.stuck) {
                         var info = getOutputInfo(be, entry.outputs);
                         applyOutputInfo(entry, info, now);
@@ -1362,7 +1397,7 @@ public class CraftTracker {
                         TrackerEntry entry = new TrackerEntry(locked ? now : 0);
                         entry.sourceClass = be.getClass().getName();
                         if (!locked) {
-                            entry.busyStartMs = now;
+                            beginBusyMonitoring(immPos, entry, now);
                         }
                         entry.stuck = locked;
                         applyOutputInfo(entry, info, now);
@@ -1459,18 +1494,19 @@ public class CraftTracker {
         entry.lastOutputSeenMs = now;
     }
 
-    private static boolean isDurationStuck(TrackerEntry entry, long now) {
-        long startMs;
-        if (entry.lockStartMs != 0) {
-            startMs = entry.lockStartMs;
-        } else if (entry.busyStartMs != 0) {
-            startMs = entry.busyStartMs;
-        } else if (entry.activeStartMs != 0) {
-            startMs = entry.activeStartMs;
-        } else {
+    private static void beginBusyMonitoring(BlockPos pos, TrackerEntry entry, long now) {
+        entry.busyStartMs = now;
+        entry.lastBusyProgressMs = now;
+        providerTransferProgress.remove(pos);
+    }
+
+    private static boolean refreshBusyTransferProgress(BlockPos pos, TrackerEntry entry) {
+        long progressMs = providerTransferProgress.getOrDefault(pos, 0L);
+        if (progressMs <= entry.lastBusyProgressMs || progressMs < entry.busyStartMs) {
             return false;
         }
-        return now - startMs >= CTConfig.stuckThresholdSeconds * 1000L;
+        entry.lastBusyProgressMs = progressMs;
+        return true;
     }
 
     private static boolean samePrimaryOutput(@Nullable List<OutputItem> current, List<OutputItem> next) {
@@ -1510,6 +1546,7 @@ public class CraftTracker {
                 + " missed=" + entry.missedCount
                 + " cooldownMs=" + Math.max(0, entry.cooldownUntilMs - now)
                 + " busyAgeMs=" + age(now, entry.busyStartMs)
+                + " busyProgressAgeMs=" + age(now, entry.lastBusyProgressMs)
                 + " lockAgeMs=" + age(now, entry.lockStartMs)
                 + " activeAgeMs=" + age(now, entry.activeStartMs)
                 + " lastOutputAgeMs=" + age(now, entry.lastOutputSeenMs)
@@ -1786,7 +1823,9 @@ public class CraftTracker {
         if (entry.lockStartMs != 0) {
             startMs = entry.lockStartMs;
         } else if (entry.busyStartMs != 0) {
-            startMs = entry.busyStartMs;
+            startMs = entry.lastBusyProgressMs != 0
+                    ? entry.lastBusyProgressMs
+                    : entry.busyStartMs;
         } else if (entry.activeStartMs != 0) {
             startMs = entry.activeStartMs;
         } else {
@@ -1805,6 +1844,7 @@ public class CraftTracker {
     private static class TrackerEntry {
         long lockStartMs;
         long busyStartMs; // when busy+!locked started (output full detection), 0 = not busy
+        long lastBusyProgressMs;
         long activeStartMs;
         long lastOutputSeenMs;
         int missedCount;
@@ -1832,6 +1872,7 @@ public class CraftTracker {
         entries.clear();
         prevProviderBusy.clear();
         currentProviderCrafts.clear();
+        providerTransferProgress.clear();
         currentEcoBusCrafts.clear();
         ecoThreadBusPositions.clear();
         ecoThreadProgress.clear();
