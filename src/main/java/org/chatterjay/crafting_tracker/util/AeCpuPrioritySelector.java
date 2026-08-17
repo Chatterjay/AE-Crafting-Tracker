@@ -341,11 +341,20 @@ public final class AeCpuPrioritySelector {
                 Long cpuPriority = runtimePriority(cpu);
                 boolean minHoldElapsed = TickHandler.instance().getCurrentTick() - hold.createdTick() >= MIN_PRIORITY_HOLD_TICKS;
                 boolean promotedStillBusy = isRuntimePriorityBusy(cpus, hold.promotedCpuKey(), hold.priority());
-                boolean shouldResume = !containsStableCpu(cpus, cpu)
-                        || !cpu.isBusy()
+                boolean cpuPresentInSnapshot = containsStableCpu(cpus, cpu);
+                boolean cpuBusy = cpu.isBusy();
+                boolean shouldResume = !cpuBusy
                         || (minHoldElapsed && !promotedStillBusy)
                         || (minHoldElapsed && highestBusyPriority == Long.MIN_VALUE)
                         || (minHoldElapsed && cpuPriority != null && cpuPriority >= highestBusyPriority);
+                if (shouldResume) {
+                    ModLogger.debug("Priority hold resume check for '{}' presentInSnapshot={}, busy={}, "
+                                    + "minHoldElapsed={}, promotedStillBusy={}, highestBusyPriority={}, cpuPriority={}, "
+                                    + "reason={}",
+                            displayName(cpu), cpuPresentInSnapshot, cpuBusy, minHoldElapsed, promotedStillBusy,
+                            highestBusyPriority, cpuPriority, resumeReason(cpuBusy, minHoldElapsed, promotedStillBusy,
+                                    highestBusyPriority, cpuPriority));
+                }
                 if (shouldResume) {
                     if (isJobSuspended(cpu)) {
                         setJobSuspended(cpu, false);
@@ -361,6 +370,9 @@ public final class AeCpuPrioritySelector {
         if (cpu instanceof CraftingCPUCluster) {
             return true;
         }
+        if (cpu instanceof DirectCpuSuspendAccess) {
+            return true;
+        }
         if (findMethod(cpu.getClass(), "setJobSuspended", boolean.class) != null
                 && findMethod(cpu.getClass(), "isJobSuspended") != null) {
             return true;
@@ -373,6 +385,9 @@ public final class AeCpuPrioritySelector {
     private static boolean isJobSuspended(ICraftingCPU cpu) {
         if (cpu instanceof CraftingCPUCluster cluster) {
             return cluster.craftingLogic.isJobSuspended();
+        }
+        if (cpu instanceof DirectCpuSuspendAccess access) {
+            return access.craftingtracker$isJobSuspended();
         }
         try {
             var method = findMethod(cpu.getClass(), "isJobSuspended");
@@ -400,6 +415,10 @@ public final class AeCpuPrioritySelector {
     private static boolean setJobSuspended(ICraftingCPU cpu, boolean suspended) {
         if (cpu instanceof CraftingCPUCluster cluster) {
             cluster.craftingLogic.setJobSuspended(suspended);
+            return true;
+        }
+        if (cpu instanceof DirectCpuSuspendAccess access) {
+            access.craftingtracker$setJobSuspended(suspended);
             return true;
         }
         try {
@@ -491,6 +510,14 @@ public final class AeCpuPrioritySelector {
                     highestBusyPriority = priority;
                 }
             }
+            for (var entry : RUNTIME_PRIORITIES.entrySet()) {
+                ICraftingCPU cpu = entry.getKey();
+                Long priority = entry.getValue();
+                if (cpu != null && priority != null && cpu.isBusy() && priority > highestBusyPriority) {
+                    markRuntimePriorityBusy(cpu);
+                    highestBusyPriority = priority;
+                }
+            }
         }
         return highestBusyPriority;
     }
@@ -509,7 +536,41 @@ public final class AeCpuPrioritySelector {
                 return true;
             }
         }
+        synchronized (RUNTIME_PRIORITIES) {
+            for (var entry : RUNTIME_PRIORITIES.entrySet()) {
+                ICraftingCPU cpu = entry.getKey();
+                Long cpuPriority = entry.getValue();
+                if (cpu != null && cpu.isBusy()
+                        && (stableCpuKey(cpu).equals(promotedCpuKey)
+                        || (cpuPriority != null && cpuPriority >= priority))) {
+                    markRuntimePriorityBusy(cpu);
+                    return true;
+                }
+            }
+        }
         return false;
+    }
+
+    private static String resumeReason(
+            boolean cpuBusy,
+            boolean minHoldElapsed,
+            boolean promotedStillBusy,
+            long highestBusyPriority,
+            Long cpuPriority
+    ) {
+        if (!cpuBusy) {
+            return "suspended CPU no longer owns a job";
+        }
+        if (minHoldElapsed && !promotedStillBusy) {
+            return "promoted CPU no longer busy";
+        }
+        if (minHoldElapsed && highestBusyPriority == Long.MIN_VALUE) {
+            return "no busy runtime-priority CPU remains";
+        }
+        if (minHoldElapsed && cpuPriority != null && cpuPriority >= highestBusyPriority) {
+            return "suspended CPU priority is no longer lower";
+        }
+        return "priority hold ended";
     }
 
     private static boolean shouldDeferCpuDispatch(ICraftingCPU currentCpu) {
