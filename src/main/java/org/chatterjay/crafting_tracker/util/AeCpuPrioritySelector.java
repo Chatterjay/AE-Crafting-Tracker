@@ -24,6 +24,11 @@ import java.util.Set;
 import java.util.WeakHashMap;
 
 public final class AeCpuPrioritySelector {
+    @FunctionalInterface
+    public interface PatternPusher {
+        boolean push(ICraftingProvider provider, IPatternDetails patternDetails, KeyCounter[] inputHolder);
+    }
+
     private static final String ADVANCED_AE_CPU_CLASS = "net.pedroksl.advanced_ae.common.cluster.AdvCraftingCPU";
     private static final String ADVANCED_AE_PENDING_KEY_PREFIX = "advanced_ae:pending:";
     private static final String NEO_ECO_CPU_CLASS = "cn.dancingsnow.neoecoae.api.me.ECOCraftingCPU";
@@ -119,12 +124,27 @@ public final class AeCpuPrioritySelector {
             IPatternDetails patternDetails,
             KeyCounter[] inputHolder
     ) {
+        return pushPatternWithPriority(currentCpu, provider, patternDetails, inputHolder,
+                ICraftingProvider::pushPattern);
+    }
+
+    /**
+     * Applies CPU priority checks and delegates the actual push to the caller. Using a delegate
+     * keeps this hook composable with other mods that wrap AE2's pushPattern invocation.
+     */
+    public static boolean pushPatternWithPriority(
+            ICraftingCPU currentCpu,
+            ICraftingProvider provider,
+            IPatternDetails patternDetails,
+            KeyCounter[] inputHolder,
+            PatternPusher pusher
+    ) {
         if (shouldDeferCpuDispatch(currentCpu)) {
             logDeferredCpuDispatch(currentCpu);
             return false;
         }
 
-        return provider.pushPattern(patternDetails, inputHolder);
+        return pusher.push(provider, patternDetails, inputHolder);
     }
 
     public static boolean shouldDeferCpuTick(ICraftingCPU currentCpu) {
