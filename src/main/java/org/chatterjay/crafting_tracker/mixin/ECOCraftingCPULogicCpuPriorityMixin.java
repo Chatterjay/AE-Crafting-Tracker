@@ -50,7 +50,8 @@ public abstract class ECOCraftingCPULogicCpuPriorityMixin {
     @Inject(
             method = "recordPushedPattern(Lcn/dancingsnow/neoecoae/api/me/ExecutingCraftingJob;"
                     + "Lcn/dancingsnow/neoecoae/impl/crafting/fastpath/ECOExtractedPatternExecution;JZ)V",
-            at = @At("HEAD"))
+            at = @At("HEAD"),
+            require = 0)
     private void craftingtracker$recordFastPathBatchPattern(
             @Coerce Object job, @Coerce Object execution, long amount, boolean reusable, CallbackInfo ci) {
         CraftTracker.recordCpuPatternPush(AeCpuPrioritySelector.cpuFromLogic(this), execution);
