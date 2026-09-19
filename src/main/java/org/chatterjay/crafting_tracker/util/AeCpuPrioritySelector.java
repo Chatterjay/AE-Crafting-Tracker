@@ -22,6 +22,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class AeCpuPrioritySelector {
     @FunctionalInterface
@@ -490,34 +491,60 @@ public final class AeCpuPrioritySelector {
         return null;
     }
 
+    // --- Cached reflection ---------------------------------------------------------
+    // Same reasoning as CraftTracker: resolving members on every call rebuilds Field/Method
+    // objects, repeats the access check and throws stack-trace-carrying exceptions on misses.
+
+    /** Marks a member that does not exist; ConcurrentHashMap cannot store null values. */
+    private static final Object ABSENT_MEMBER = new Object();
+    private static final Map<Class<?>, Map<String, Object>> FIELD_CACHE = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, Map<String, Object>> METHOD_CACHE = new ConcurrentHashMap<>();
+
     @Nullable
     private static java.lang.reflect.Field findField(Class<?> type, String name) {
-        Class<?> current = type;
-        while (current != null) {
-            try {
-                var field = current.getDeclaredField(name);
-                field.setAccessible(true);
-                return field;
-            } catch (NoSuchFieldException ignored) {
-                current = current.getSuperclass();
-            }
-        }
-        return null;
+        Object cached = FIELD_CACHE
+                .computeIfAbsent(type, c -> new ConcurrentHashMap<>())
+                .computeIfAbsent(name, n -> {
+                    for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+                        try {
+                            var field = current.getDeclaredField(n);
+                            field.setAccessible(true);
+                            return field;
+                        } catch (NoSuchFieldException ignored) {
+                            // Not declared here, keep walking up the hierarchy.
+                        } catch (RuntimeException inaccessible) {
+                            // InaccessibleObjectException / SecurityException: skip this level.
+                        }
+                    }
+                    return ABSENT_MEMBER;
+                });
+        return cached == ABSENT_MEMBER ? null : (java.lang.reflect.Field) cached;
     }
 
     @Nullable
     private static java.lang.reflect.Method findMethod(Class<?> type, String name, Class<?>... parameterTypes) {
-        Class<?> current = type;
-        while (current != null) {
-            try {
-                var method = current.getDeclaredMethod(name, parameterTypes);
-                method.setAccessible(true);
-                return method;
-            } catch (NoSuchMethodException ignored) {
-                current = current.getSuperclass();
-            }
+        StringBuilder key = new StringBuilder(name).append('(');
+        for (Class<?> parameterType : parameterTypes) {
+            key.append(parameterType.getName()).append(';');
         }
-        return null;
+        String cacheKey = key.append(')').toString();
+        Object cached = METHOD_CACHE
+                .computeIfAbsent(type, c -> new ConcurrentHashMap<>())
+                .computeIfAbsent(cacheKey, k -> {
+                    for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+                        try {
+                            var method = current.getDeclaredMethod(name, parameterTypes);
+                            method.setAccessible(true);
+                            return method;
+                        } catch (NoSuchMethodException ignored) {
+                            // Not declared here, keep walking up the hierarchy.
+                        } catch (RuntimeException inaccessible) {
+                            // InaccessibleObjectException / SecurityException: skip this level.
+                        }
+                    }
+                    return ABSENT_MEMBER;
+                });
+        return cached == ABSENT_MEMBER ? null : (java.lang.reflect.Method) cached;
     }
 
     private static long highestBusyRuntimePriority(Collection<? extends ICraftingCPU> cpus) {

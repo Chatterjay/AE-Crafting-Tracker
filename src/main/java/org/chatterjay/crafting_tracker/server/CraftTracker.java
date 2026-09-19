@@ -1,5 +1,7 @@
 package org.chatterjay.crafting_tracker.server;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -12,6 +14,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 import javax.annotation.Nullable;
 
@@ -64,6 +67,10 @@ public class CraftTracker {
     private static final long OUTPUT_GRACE_MS = 2500;
     private static final long ECO_HANDOFF_GRACE_MS = 1500;
     private static final long MATRIX_HANDOFF_GRACE_MS = 1500;
+    /** How often the reflective cluster scan may run for one matrix pattern block. */
+    private static final long MATRIX_RECOVERY_INTERVAL_MS = 1000;
+    /** Idle time after which a scan timestamp is dropped again. */
+    private static final long MATRIX_RECOVERY_IDLE_MS = 60_000;
     private static final long HIGHLIGHT_HEARTBEAT_TICKS = 20;
     private static final String ECO_CPU_CLASS = "cn.dancingsnow.neoecoae.api.me.ECOCraftingCPU";
     private static final String ECO_PATTERN_BUS_CLASS =
@@ -102,6 +109,7 @@ public class CraftTracker {
             ThreadLocal.withInitial(ArrayDeque::new);
     private static final Map<BlockPos, Map<Object, ProviderCraft>> currentMatrixPatternCrafts = new HashMap<>();
     private static final Map<BlockPos, MatrixHandoff> matrixPatternHandoffs = new HashMap<>();
+    private static final Map<BlockPos, Long> matrixRecoveryAtMs = new HashMap<>();
     private static final ThreadLocal<Deque<MatrixPatternDispatch>> matrixPatternDispatches =
             ThreadLocal.withInitial(ArrayDeque::new);
     private static final Map<UUID, ProviderCraft> currentTrinityCoreCrafts = new HashMap<>();
@@ -152,17 +160,96 @@ public class CraftTracker {
         return be != null && be.getClass().getName().equals(TRINITY_PATTERN_CORE_CLASS);
     }
 
-    private static Object invokeNoArg(Object target, String methodName) {
+    // --- Cached reflection ---------------------------------------------------------
+    // Resolving members reflectively is very expensive when done per call: getDeclaredField
+    // builds a fresh Field plus accessor every time, setAccessible re-runs the caller check,
+    // and a miss throws an exception complete with a full stack trace. Everything is now
+    // resolved once per (class, member) pair and misses are remembered, so the hot tick path
+    // is a map lookup.
+
+    /** Marks a member that does not exist; ConcurrentHashMap cannot store null values. */
+    private static final Object ABSENT_MEMBER = new Object();
+
+    private static final Map<Class<?>, Map<String, Object>> FIELD_CACHE = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, Map<String, Object>> METHOD_CACHE = new ConcurrentHashMap<>();
+    private static final Map<String, Map<Class<?>, Boolean>> TYPE_CHECK_CACHE = new ConcurrentHashMap<>();
+
+    /** Pre-allocated so that "field not found" never captures a stack trace. */
+    private static final NoSuchFieldException FIELD_NOT_FOUND =
+            new NoSuchFieldException("field is not present on the class hierarchy");
+
+    @Nullable
+    private static Field lookupField(Class<?> type, String fieldName) {
+        Map<String, Object> perClass = FIELD_CACHE.computeIfAbsent(type, c -> new ConcurrentHashMap<>());
+        Object cached = perClass.get(fieldName);
+        if (cached == null) {
+            cached = perClass.computeIfAbsent(fieldName, name -> resolveField(type, name));
+        }
+        return cached == ABSENT_MEMBER ? null : (Field) cached;
+    }
+
+    private static Object resolveField(Class<?> type, String fieldName) {
+        for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+            try {
+                Field field = current.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                return field;
+            } catch (NoSuchFieldException missing) {
+                // Not declared here, keep walking up the hierarchy.
+            } catch (RuntimeException inaccessible) {
+                // InaccessibleObjectException / SecurityException: skip this level.
+            }
+        }
+        return ABSENT_MEMBER;
+    }
+
+    @Nullable
+    private static Method lookupMethod(Class<?> type, String methodName, Class<?>... parameterTypes) {
+        // The no-arg lookup is by far the hottest one; its name is already a unique key.
+        String cacheKey = parameterTypes.length == 0
+                ? methodName
+                : methodSignature(methodName, parameterTypes);
+        Map<String, Object> perClass = METHOD_CACHE.computeIfAbsent(type, c -> new ConcurrentHashMap<>());
+        Object cached = perClass.get(cacheKey);
+        if (cached == null) {
+            cached = perClass.computeIfAbsent(cacheKey, key -> resolveMethod(type, methodName, parameterTypes));
+        }
+        return cached == ABSENT_MEMBER ? null : (Method) cached;
+    }
+
+    private static String methodSignature(String methodName, Class<?>[] parameterTypes) {
+        StringBuilder key = new StringBuilder(methodName).append('(');
+        for (Class<?> parameterType : parameterTypes) {
+            key.append(parameterType.getName()).append(';');
+        }
+        return key.append(')').toString();
+    }
+
+    private static Object resolveMethod(Class<?> type, String methodName, Class<?>[] parameterTypes) {
         try {
-            return target.getClass().getMethod(methodName).invoke(target);
+            return type.getMethod(methodName, parameterTypes);
+        } catch (NoSuchMethodException | RuntimeException missing) {
+            return ABSENT_MEMBER;
+        }
+    }
+
+    private static Object invokeNoArg(Object target, String methodName) {
+        if (target == null) return null;
+        Method method = lookupMethod(target.getClass(), methodName);
+        if (method == null) return null;
+        try {
+            return method.invoke(target);
         } catch (ReflectiveOperationException | RuntimeException ignored) {
             return null;
         }
     }
 
     private static Object invokeInt(Object target, String methodName, int value) {
+        if (target == null) return null;
+        Method method = lookupMethod(target.getClass(), methodName, int.class);
+        if (method == null) return null;
         try {
-            return target.getClass().getMethod(methodName, int.class).invoke(target, value);
+            return method.invoke(target, value);
         } catch (ReflectiveOperationException | RuntimeException ignored) {
             return null;
         }
@@ -176,11 +263,18 @@ public class CraftTracker {
         return value != null && hasType(value.getClass(), className);
     }
 
-    private static boolean hasType(Class<?> type, String className) {
+    private static boolean hasType(@Nullable Class<?> type, String className) {
+        if (type == null) return false;
+        return TYPE_CHECK_CACHE
+                .computeIfAbsent(className, k -> new ConcurrentHashMap<>())
+                .computeIfAbsent(type, t -> computeHasType(t, className));
+    }
+
+    private static boolean computeHasType(Class<?> type, String className) {
         while (type != null) {
             if (type.getName().equals(className)) return true;
             for (Class<?> iface : type.getInterfaces()) {
-                if (hasType(iface, className)) return true;
+                if (computeHasType(iface, className)) return true;
             }
             type = type.getSuperclass();
         }
@@ -390,11 +484,11 @@ public class CraftTracker {
     public static void recordEcoPatternBusPush(Object patternBus, Object execution, @Nullable UUID jobId) {
         if (!(patternBus instanceof ICraftingProvider provider) || execution == null) return;
         try {
-            Object details = execution.getClass().getMethod("details").invoke(execution);
+            Object details = invokeNoArg(execution, "details");
             if (details instanceof IPatternDetails patternDetails) {
                 recordProviderPatternPush(provider, patternDetails, jobId);
             }
-        } catch (ReflectiveOperationException | RuntimeException ignored) {
+        } catch (RuntimeException ignored) {
             // NeoECO is optional and its execution wrapper can be unavailable during shutdown.
         }
     }
@@ -402,17 +496,14 @@ public class CraftTracker {
     /** Opens a dispatch scope so the ECO worker thread can be tied to its source FD bus. */
     public static void beginEcoPatternBusPush(Object patternBus, Object execution, @Nullable UUID jobId) {
         if (!(patternBus instanceof BlockEntity be) || execution == null) return;
-        try {
-            Object details = execution.getClass().getMethod("details").invoke(execution);
-            if (details instanceof IPatternDetails patternDetails) {
-                GenericStack output = patternDetails.getPrimaryOutput();
-                if (output != null && output.what() != null) {
-                    ecoBusDispatches.get().push(new EcoBusDispatch(
-                            be.getBlockPos(), new ProviderCraft(output.what().getId(), jobId)));
-                }
+        // ECO's execution type is optional at runtime.
+        Object details = invokeNoArg(execution, "details");
+        if (details instanceof IPatternDetails patternDetails) {
+            GenericStack output = patternDetails.getPrimaryOutput();
+            if (output != null && output.what() != null) {
+                ecoBusDispatches.get().push(new EcoBusDispatch(
+                        be.getBlockPos(), new ProviderCraft(output.what().getId(), jobId)));
             }
-        } catch (ReflectiveOperationException ignored) {
-            // ECO's execution type is optional at runtime.
         }
     }
 
@@ -420,8 +511,8 @@ public class CraftTracker {
     public static void beginEcoBatchPatternBusPush(Object patternBus, Object request) {
         if (!(patternBus instanceof BlockEntity be) || request == null) return;
         try {
-            Object details = request.getClass().getMethod("details").invoke(request);
-            Object job = request.getClass().getMethod("craftingJobId").invoke(request);
+            Object details = invokeNoArg(request, "details");
+            Object job = invokeNoArg(request, "craftingJobId");
             UUID jobId = job instanceof UUID id ? id : null;
             if (details instanceof IPatternDetails patternDetails) {
                 GenericStack output = patternDetails.getPrimaryOutput();
@@ -430,7 +521,7 @@ public class CraftTracker {
                             be.getBlockPos(), new ProviderCraft(output.what().getId(), jobId)));
                 }
             }
-        } catch (ReflectiveOperationException | RuntimeException ignored) {
+        } catch (RuntimeException ignored) {
             // ECO's batch request is optional at runtime.
         }
     }
@@ -662,9 +753,19 @@ public class CraftTracker {
         }
 
         // A matrix job can predate enabling the highlighter, or arrive through an
-        // optional integration path that does not retain the dispatch call stack.
-        // Recover only workers whose active pattern belongs to this exact core.
-        recoverMatrixExecutions(matrix, executions);
+        // optional integration path that does not retain the dispatch call stack, so this
+        // core may have no recorded execution even though its workers are running.
+        // The scan walks every block entity of the cluster, which is far too expensive to
+        // repeat on every tick of every idle matrix in range, so it only runs when nothing
+        // is tracked and at most once per second. A dispatched job is already covered by
+        // the call hooks, so this fallback is never on the hot path of a known execution.
+        long nowMs = System.currentTimeMillis();
+        if (executions.isEmpty()
+                && nowMs - matrixRecoveryAtMs.getOrDefault(patternPosition, 0L)
+                        >= MATRIX_RECOVERY_INTERVAL_MS) {
+            matrixRecoveryAtMs.put(patternPosition, nowMs);
+            recoverMatrixExecutions(matrix, executions);
+        }
         if (executions.isEmpty()) {
             currentMatrixPatternCrafts.remove(patternPosition);
             if (!completedThreads.isEmpty()) {
@@ -674,12 +775,11 @@ public class CraftTracker {
                         patternPosition, completedThreads.size());
             }
             MatrixHandoff handoff = matrixPatternHandoffs.get(patternPosition);
-            long now = System.currentTimeMillis();
-            if (handoff != null && handoff.untilMs() > now) {
+            if (handoff != null && handoff.untilMs() > nowMs) {
                 ModLogger.debugThrottled("matrix.handoff." + patternPosition.asLong(),
                         CTConfig.debugLogIntervalTicks,
                         "Preserving matrix highlight between batches pos={} outputId={} remainingMs={}",
-                        patternPosition, handoff.craft().outputId(), handoff.untilMs() - now);
+                        patternPosition, handoff.craft().outputId(), handoff.untilMs() - nowMs);
                 return handoff.craft();
             }
             matrixPatternHandoffs.remove(patternPosition);
@@ -817,20 +917,17 @@ public class CraftTracker {
     /** Records a Trinity dispatch only after its provider accepted ownership and CPU accounting completed. */
     public static void recordTrinityDispatch(Object request, Object result) {
         if (request == null || result == null) return;
-        try {
-            Object dispatched = result.getClass().getMethod("dispatched").invoke(result);
-            if (!Boolean.TRUE.equals(dispatched)) return;
-            Object provider = request.getClass().getMethod("provider").invoke(request);
-            Object patternDetails = request.getClass().getMethod("pattern").invoke(request);
-            Object job = request.getClass().getMethod("jobId").invoke(request);
-            if (provider instanceof ICraftingProvider craftingProvider
-                    && patternDetails instanceof IPatternDetails details) {
-                UUID jobId = job instanceof UUID id ? id : null;
-                recordProviderPatternPush(craftingProvider, details, jobId);
-                recordTrinityCorePattern(details, jobId);
-            }
-        } catch (ReflectiveOperationException ignored) {
-            // Trinity's dispatch types are optional at runtime.
+        // Trinity's dispatch types are optional at runtime.
+        Object dispatched = invokeNoArg(result, "dispatched");
+        if (!Boolean.TRUE.equals(dispatched)) return;
+        Object provider = invokeNoArg(request, "provider");
+        Object patternDetails = invokeNoArg(request, "pattern");
+        Object job = invokeNoArg(request, "jobId");
+        if (provider instanceof ICraftingProvider craftingProvider
+                && patternDetails instanceof IPatternDetails details) {
+            UUID jobId = job instanceof UUID id ? id : null;
+            recordProviderPatternPush(craftingProvider, details, jobId);
+            recordTrinityCorePattern(details, jobId);
         }
     }
 
@@ -860,6 +957,7 @@ public class CraftTracker {
 
         long now = System.currentTimeMillis();
         int radius = CTConfig.scanRadius;
+        matrixRecoveryAtMs.entrySet().removeIf(entry -> now - entry.getValue() > MATRIX_RECOVERY_IDLE_MS);
 
         ModLogger.debugThrottled("server.tick", CTConfig.debugLogIntervalTicks,
                 "Tracker tick players={} entries={} radius={} scanInterval={} gameTime={}",
@@ -1054,8 +1152,9 @@ public class CraftTracker {
         if (!be.getClass().getName().equals("com.glodblock.github.extendedae.common.tileentities.TileExMolecularAssembler")) {
             return 0;
         }
+        Method method = lookupMethod(be.getClass(), "getCraftingProgress", int.class);
+        if (method == null) return 0;
         try {
-            var method = be.getClass().getMethod("getCraftingProgress", int.class);
             for (int thread = 0; thread < 16; thread++) {
                 Object value = method.invoke(be, thread);
                 if (value instanceof Number progress && progress.intValue() > 0) {
@@ -1879,6 +1978,7 @@ public class CraftTracker {
         ecoBusHandoffUntilMs.clear();
         currentMatrixPatternCrafts.clear();
         matrixPatternHandoffs.clear();
+        matrixRecoveryAtMs.clear();
         currentTrinityCoreCrafts.clear();
         currentCpuCrafts.clear();
         ecoBusDispatches.remove();
@@ -1916,17 +2016,14 @@ public class CraftTracker {
     /** Records the pattern that ECO actually accepted, including its fast-path execution. */
     public static void recordCpuPatternPush(@Nullable ICraftingCPU cpu, Object execution) {
         if (cpu == null || execution == null) return;
-        try {
-            Object outputs = execution.getClass().getMethod("expectedOutputs").invoke(execution);
-            if (!(outputs instanceof List<?> list)) return;
-            for (Object value : list) {
-                if (value instanceof GenericStack stack && stack.what() != null) {
-                    currentCpuCrafts.put(cpu, stack.what().getId());
-                    return;
-                }
+        // ECO is optional and this method is intentionally accessed without a compile dependency.
+        Object outputs = invokeNoArg(execution, "expectedOutputs");
+        if (!(outputs instanceof List<?> list)) return;
+        for (Object value : list) {
+            if (value instanceof GenericStack stack && stack.what() != null) {
+                currentCpuCrafts.put(cpu, stack.what().getId());
+                return;
             }
-        } catch (ReflectiveOperationException ignored) {
-            // ECO is optional and this method is intentionally accessed without a compile dependency.
         }
     }
 
@@ -1942,7 +2039,7 @@ public class CraftTracker {
             if (job == null) return;
             Object link = readField(job, "link");
             if (link == null) return;
-            Object craftingId = link.getClass().getMethod("getCraftingID").invoke(link);
+            Object craftingId = invokeNoArg(link, "getCraftingID");
             if (!(craftingId instanceof UUID jobId)) return;
             synchronized (currentProviderCrafts) {
                 currentProviderCrafts.entrySet().removeIf(entry -> jobId.equals(entry.getValue().jobId()));
@@ -1966,30 +2063,21 @@ public class CraftTracker {
 
     private static Object readField(Object target, String fieldName) throws ReflectiveOperationException {
         if (target == null) return null;
-        Class<?> type = target.getClass();
-        while (type != null) {
-            try {
-                var field = type.getDeclaredField(fieldName);
-                field.setAccessible(true);
-                return field.get(target);
-            } catch (NoSuchFieldException ignored) {
-                type = type.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(fieldName);
+        Field field = lookupField(target.getClass(), fieldName);
+        // Pre-allocated instance: signalling a miss must not capture a stack trace.
+        if (field == null) throw FIELD_NOT_FOUND;
+        return field.get(target);
     }
 
     private static void recordTrinityCorePattern(IPatternDetails details, @Nullable UUID jobId) {
-        try {
-            Object route = details.getClass().getMethod("route").invoke(details);
-            Object coreId = route.getClass().getMethod("coreId").invoke(route);
-            GenericStack output = details.getPrimaryOutput();
-            if (coreId instanceof UUID id && output != null && output.what() != null) {
-                currentTrinityCoreCrafts.put(id, new ProviderCraft(output.what().getId(), jobId));
-                markHighlightStateChanged();
-            }
-        } catch (ReflectiveOperationException ignored) {
-            // Only DataEnergistics routed patterns expose a physical Trinity pattern-core identity.
+        // Only DataEnergistics routed patterns expose a physical Trinity pattern-core identity.
+        Object route = invokeNoArg(details, "route");
+        if (route == null) return;
+        Object coreId = invokeNoArg(route, "coreId");
+        GenericStack output = details.getPrimaryOutput();
+        if (coreId instanceof UUID id && output != null && output.what() != null) {
+            currentTrinityCoreCrafts.put(id, new ProviderCraft(output.what().getId(), jobId));
+            markHighlightStateChanged();
         }
     }
 }
