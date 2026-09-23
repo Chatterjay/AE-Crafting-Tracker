@@ -9,6 +9,7 @@ import net.minecraft.core.BlockPos;
 
 import org.chatterjay.crafting_tracker.network.payloads.S2CCraftHighlightData;
 import org.chatterjay.crafting_tracker.network.payloads.S2CCraftHighlightData.HighlightEntry;
+import org.chatterjay.crafting_tracker.api.CraftStatus;
 import org.chatterjay.crafting_tracker.config.CTConfig;
 import org.chatterjay.crafting_tracker.util.ModLogger;
 
@@ -17,6 +18,7 @@ public enum ClientHighlightCache {
 
     private volatile Map<BlockPos, HighlightEntry> highlights = Map.of();
     private volatile int runtimeRemainingTicks = 0;
+    private volatile int statusFilter = -1;
 
     public void update(S2CCraftHighlightData data) {
         ModLogger.debugThrottled("client.craft.packet", CTConfig.debugLogIntervalTicks,
@@ -44,7 +46,20 @@ public enum ClientHighlightCache {
     }
 
     public List<HighlightEntry> getActiveHighlights() {
-        return new ArrayList<>(highlights.values());
+        List<HighlightEntry> result = new ArrayList<>();
+        for (HighlightEntry entry : highlights.values()) {
+            if (statusFilter < 0 || entry.statusOrdinal() == statusFilter) result.add(entry);
+        }
+        return result;
+    }
+
+    public int getStatusFilter() {
+        return statusFilter;
+    }
+
+    public int cycleStatusFilter() {
+        statusFilter = statusFilter >= CraftStatus.values().length - 1 ? -1 : statusFilter + 1;
+        return statusFilter;
     }
 
     public int getRuntimeRemainingTicks() {

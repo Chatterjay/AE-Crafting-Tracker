@@ -10,6 +10,7 @@ import net.neoforged.neoforge.common.NeoForge;
 import appeng.client.gui.me.crafting.CraftingStatusScreen;
 import appeng.client.gui.widgets.AE2Button;
 
+import org.chatterjay.crafting_tracker.client.ClientHighlightCache;
 import org.chatterjay.crafting_tracker.network.payloads.C2SToggleRuntimeHighlight;
 
 import net.neoforged.neoforge.network.PacketDistributor;
@@ -58,6 +59,9 @@ public class CraftingScreenHandler {
             }
         };
 
+        button.setTooltip(net.minecraft.client.gui.components.Tooltip.create(
+                Component.translatable("button.crafting_tracker.runtime_highlight.tooltip")));
+
         event.addListener(button);
     }
 
@@ -68,9 +72,32 @@ public class CraftingScreenHandler {
     }
 
     private static void onClick(CraftingStatusScreen screen) {
+        if (Screen.hasControlDown()) {
+            int filter = ClientHighlightCache.INSTANCE.cycleStatusFilter();
+            var player = Minecraft.getInstance().player;
+            if (player != null) {
+                player.displayClientMessage(
+                        Component.translatable("button.crafting_tracker.runtime_highlight.filter_changed",
+                                Component.translatable(filterTranslationKey(filter))),
+                        true);
+            }
+            if (screen.getFocused() != null)
+                screen.setFocused(null);
+            return;
+        }
+
         runtimeActive = !runtimeActive;
         PacketDistributor.sendToServer(new C2SToggleRuntimeHighlight(runtimeActive));
         if (screen.getFocused() != null)
             screen.setFocused(null);
+    }
+
+    private static String filterTranslationKey(int filter) {
+        return switch (filter) {
+            case 0 -> "button.crafting_tracker.runtime_highlight.filter.active";
+            case 1 -> "button.crafting_tracker.runtime_highlight.filter.stalled";
+            case 2 -> "button.crafting_tracker.runtime_highlight.filter.stuck";
+            default -> "button.crafting_tracker.runtime_highlight.filter.all";
+        };
     }
 }

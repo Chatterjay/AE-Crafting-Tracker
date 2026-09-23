@@ -19,6 +19,12 @@
 
   "button.crafting_tracker.runtime_highlight.on": "Untrack",
   "button.crafting_tracker.runtime_highlight.off": "Track",
+  "button.crafting_tracker.runtime_highlight.tooltip": "Ctrl+click to cycle status filter",
+  "button.crafting_tracker.runtime_highlight.filter_changed": "Tracking display: %s",
+  "button.crafting_tracker.runtime_highlight.filter.all": "All statuses",
+  "button.crafting_tracker.runtime_highlight.filter.active": "Active",
+  "button.crafting_tracker.runtime_highlight.filter.stalled": "Slow",
+  "button.crafting_tracker.runtime_highlight.filter.stuck": "Blocked",
 
   "overlay.crafting_tracker.status.active": "Active",
   "overlay.crafting_tracker.status.stalled": "Slow",

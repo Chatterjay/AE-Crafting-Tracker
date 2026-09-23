@@ -51,6 +51,7 @@ import appeng.api.config.LockCraftingMode;
 import appeng.api.networking.IGrid;
 import appeng.api.networking.IGridNode;
 import appeng.api.networking.IInWorldGridNodeHost;
+import appeng.blockentity.networking.CableBusBlockEntity;
 import appeng.api.networking.crafting.CraftingJobStatus;
 import appeng.api.networking.crafting.ICraftingCPU;
 import appeng.api.networking.crafting.ICraftingProvider;
@@ -139,9 +140,20 @@ public class CraftTracker {
     // --- Type abstractions for AE2 and optional provider implementations ---
 
     private static boolean isPatternSource(BlockEntity be) {
-        return be instanceof PatternProviderLogicHost || isMatrixSource(be)
+        return getPatternProviderHost(be) != null || isMatrixSource(be)
                 || isAdvancedPatternProvider(be) || isEcoPatternBus(be)
                 || isTrinityPatternCore(be);
+    }
+
+    @Nullable
+    private static PatternProviderLogicHost getPatternProviderHost(@Nullable BlockEntity be) {
+        if (be instanceof PatternProviderLogicHost host) return host;
+        if (!(be instanceof CableBusBlockEntity cableBus)) return null;
+
+        for (Direction direction : Direction.values()) {
+            if (cableBus.getPart(direction) instanceof PatternProviderLogicHost host) return host;
+        }
+        return null;
     }
 
     private static boolean isMatrixSource(BlockEntity be) {
@@ -291,7 +303,8 @@ public class CraftTracker {
     }
 
     private static boolean isPatternBusy(BlockEntity be) {
-        if (be instanceof PatternProviderLogicHost host) return host.getLogic().isBusy();
+        PatternProviderLogicHost host = getPatternProviderHost(be);
+        if (host != null) return host.getLogic().isBusy();
         if (isMatrixSource(be)) {
             // ExtendedAE's isBusy() is cluster-wide and also reports true while a
             // pattern core has not yet joined a cluster. Track its real worker.
@@ -309,7 +322,8 @@ public class CraftTracker {
     }
 
     private static boolean isPatternLocked(BlockEntity be) {
-        if (be instanceof PatternProviderLogicHost host)
+        PatternProviderLogicHost host = getPatternProviderHost(be);
+        if (host != null)
             return host.getLogic().getCraftingLockedReason() != LockCraftingMode.NONE;
         if (isAdvancedPatternProvider(be)) {
             Object reason = invokeNoArg(invokeNoArg(be, "getLogic"), "getCraftingLockedReason");
@@ -319,7 +333,8 @@ public class CraftTracker {
     }
 
     private static List<IPatternDetails> getPatterns(BlockEntity be) {
-        if (be instanceof PatternProviderLogicHost host) return host.getLogic().getAvailablePatterns();
+        PatternProviderLogicHost host = getPatternProviderHost(be);
+        if (host != null) return host.getLogic().getAvailablePatterns();
         if (isMatrixSource(be)) return asPatternList(invokeNoArg(be, "getAvailablePatterns"));
         if (isAdvancedPatternProvider(be)) {
             return asPatternList(invokeNoArg(invokeNoArg(be, "getLogic"), "getAvailablePatterns"));
@@ -342,7 +357,8 @@ public class CraftTracker {
     @Nullable
     private static ICraftingProvider getCraftingProvider(BlockEntity be) {
         Object candidate = null;
-        if (be instanceof PatternProviderLogicHost host) {
+        PatternProviderLogicHost host = getPatternProviderHost(be);
+        if (host != null) {
             candidate = host.getLogic();
         } else if (isMatrixSource(be)) {
             candidate = be;
@@ -356,6 +372,11 @@ public class CraftTracker {
 
     @Nullable
     private static IGrid getGrid(BlockEntity be) {
+        PatternProviderLogicHost host = getPatternProviderHost(be);
+        if (host != null) {
+            IGrid grid = host.getGrid();
+            if (grid != null) return grid;
+        }
         if (isMatrixSource(be) || isAdvancedPatternProvider(be) || isEcoPatternBus(be)) {
             Object grid = invokeNoArg(be, "getGrid");
             if (grid instanceof IGrid result) return result;
@@ -1396,7 +1417,10 @@ public class CraftTracker {
                                         "busy=false cpuBusy=true adjacentActive=" + adjacentActivity.detail()
                                                 + " outputInfo=" + outputSummary(info));
                             } else {
-                                clearOutputImmediately(pos, entry, now, "provider_not_requested");
+                                // AE's request index can briefly be empty while a repeated
+                                // request is being re-queued. Keep the last output through
+                                // the normal grace window instead of dropping the highlight.
+                                clearExpiredOutput(pos, entry, now);
                                 debugProviderSample("refresh.idle_cpu_busy_clear", pos, entry, now,
                                         "busy=false cpuBusy=true adjacentActive=" + adjacentActivity.detail()
                                                 + " outputInfo=" + outputSummary(info));
@@ -1406,7 +1430,10 @@ public class CraftTracker {
                             // CPU may have started a new job even if isGridCpuBusy was false
                             var info = getOutputInfo(be, entry.outputs);
                             if (info == null || info.isEmpty()) {
-                                clearOutputImmediately(pos, entry, now, "cpu_idle_without_request");
+                                // A frequent automatic request may disappear for one tick
+                                // between CPU status updates. Apply the same hysteresis used
+                                // by the normal idle path to prevent highlight flicker.
+                                clearExpiredOutput(pos, entry, now);
                             } else {
                                 applyOutputInfo(entry, info, now);
                             }
@@ -1537,7 +1564,9 @@ public class CraftTracker {
 
     private static void applyOutputInfo(TrackerEntry entry, @Nullable OutputInfo info, long now) {
         if (info == null || info.isEmpty()) {
-            entry.currentCraftingId = null;
+            // Do not erase the current id on a transient empty request result. It is cleared
+            // together with the output after OUTPUT_GRACE_MS, keeping packet snapshots stable
+            // while AE rebuilds a repeated automatic-crafting request.
             return;
         }
         if (!info.outputs().isEmpty()) {
@@ -1901,7 +1930,8 @@ public class CraftTracker {
     }
 
     private static @Nullable GenericStackInv getReturnInventory(BlockEntity be) {
-        if (be instanceof PatternProviderLogicHost host) {
+        PatternProviderLogicHost host = getPatternProviderHost(be);
+        if (host != null) {
             return host.getLogic().getReturnInv();
         }
         if (isAdvancedPatternProvider(be)) {
