@@ -240,7 +240,12 @@ public class NetworkLocatorScanner {
             return logic == null ? List.of() : invokePatternList(logic, "getAvailablePatterns");
         }
         if (isEcoPatternBus(owner)) {
-            return invokePatternList(owner, "getLocalAvailablePatterns");
+            // NeoECO keeps one pattern catalog per block entity, so getAvailablePatterns()
+            // is already scoped to this bus. Older builds named the same list
+            // getLocalAvailablePatterns(), so both are probed.
+            List<IPatternDetails> patterns = invokePatternList(owner, "getLocalAvailablePatterns");
+            if (patterns.isEmpty()) patterns = invokePatternList(owner, "getAvailablePatterns");
+            return patterns;
         }
         if (isTrinityPatternCore(owner)) {
             return getTrinityCorePatterns(owner);

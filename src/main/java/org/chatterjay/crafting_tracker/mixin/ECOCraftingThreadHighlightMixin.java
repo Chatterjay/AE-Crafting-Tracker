@@ -1,33 +1,31 @@
 package org.chatterjay.crafting_tracker.mixin;
 
-import java.util.List;
-import java.util.UUID;
-
 import org.chatterjay.crafting_tracker.server.CraftTracker;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Coerce;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/** Keeps an FD bus highlighted only while its own ECO worker execution is alive. */
-@Mixin(targets = "cn.dancingsnow.neoecoae.api.me.ECOCraftingThread", remap = false)
+/**
+ * Keeps an FD bus highlighted only while its own ECO worker execution is alive.
+ *
+ * <p>NeoECO installs every work kind - single, batch and virtual - through
+ * {@code installWork}, so hooking that one method covers all of them. The worker work
+ * record is package-private and changed shape between releases, so the job id is read
+ * from the thread itself whenever the record cannot be inspected.
+ */
+@Mixin(targets = "cn.dancingsnow.neoecoae.crafting.execution.worker.ECOCraftingThread", remap = false)
 public abstract class ECOCraftingThreadHighlightMixin {
-    @Inject(method = "startWork", at = @At("RETURN"))
-    private void craftingtracker$attachPatternBus(
-            List<?> outputs, List<?> inputs, List<?> remaining, UUID craftingJobId,
-            int occupiedThreadSlots, int laneIndex, int networkCoolingMultiplier, CallbackInfo ci) {
-        CraftTracker.attachEcoThreadExecution(this);
+    private static final String INSTALL_WORK =
+            "installWork(Lcn/dancingsnow/neoecoae/crafting/execution/worker/ECOCraftingThreadWork;)V";
+
+    @Inject(method = INSTALL_WORK, at = @At("RETURN"), require = 0)
+    private void craftingtracker$attachPatternBus(@Coerce Object work, CallbackInfo ci) {
+        CraftTracker.attachEcoThreadExecution(this, CraftTracker.extractEcoJobId(work));
     }
 
-    @Inject(method = "startBatchWork", at = @At("RETURN"))
-    private void craftingtracker$attachBatchPatternBus(
-            List<?> outputs, List<?> inputs, List<?> remaining, UUID craftingJobId,
-            int occupiedThreadSlots, int laneIndex, int networkCoolingMultiplier,
-            boolean virtualCrafting, CallbackInfo ci) {
-        CraftTracker.attachEcoThreadExecution(this);
-    }
-
-    @Inject(method = "clearWork", at = @At("HEAD"))
+    @Inject(method = "clearWork()V", at = @At("HEAD"), require = 0)
     private void craftingtracker$clearPatternBus(CallbackInfo ci) {
         CraftTracker.clearEcoThreadExecution(this);
     }

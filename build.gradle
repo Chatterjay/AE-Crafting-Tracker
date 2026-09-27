@@ -115,9 +115,9 @@ dependencies {
 
     runtimeOnly "curse.maven:ldlib-626676:8623935"
     runtimeOnly "curse.maven:data-energistics-1565514:8660832"
-    runtimeOnly "curse.maven:neo-eco-ae-extension-1460639:8463264"
+    runtimeOnly "curse.maven:neo-eco-ae-extension-1460639:8983610"
     runtimeOnly "curse.maven:spark-361579:6225208"
-    addLocalOrRemoteDependency(delegate, "compileOnly", "run/mods/extendedae_plus-1.21.1-1.5.4.jar", "curse.maven:extendedae-plus-1337639:7960385")
+    runtimeOnly "curse.maven:extendedae-plus-1337639:8755074"
     addLocalOrRemoteDependency(delegate, "compileOnly", "run/mods/beyonddimensions-1.21.1-neoforge-0.7.14.jar", "curse.maven:beyond-dimensions-1222890:7955731")
     addLocalOrRemoteDependency(delegate, "compileOnly", "run/mods/ars_nouveau-1.21.1-5.11.7.jar", "curse.maven:ars-nouveau-401955:8201552")
     addLocalOrRemoteDependency(delegate, "compileOnly", "run/mods/Mekanism-1.21.1-10.7.19.85.jar", "curse.maven:mekanism-268560:7904058")

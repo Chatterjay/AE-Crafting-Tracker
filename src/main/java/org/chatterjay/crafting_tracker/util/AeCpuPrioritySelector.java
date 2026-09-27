@@ -51,6 +51,7 @@ public final class AeCpuPrioritySelector {
             Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<ICraftingCPU, Long> CPU_DEFER_LOG_TICKS_BY_CPU =
             Collections.synchronizedMap(new WeakHashMap<>());
+    private static final ThreadLocal<ICraftingCPU> ACTIVE_DISPATCH_CPU = new ThreadLocal<>();
 
     private AeCpuPrioritySelector() {}
 
@@ -154,6 +155,24 @@ public final class AeCpuPrioritySelector {
             return true;
         }
         return false;
+    }
+
+    /** Binds the CPU whose NeoECO dispatch callback is currently executing. */
+    public static void enterDispatchContext(@Nullable ICraftingCPU cpu) {
+        if (cpu == null) {
+            ACTIVE_DISPATCH_CPU.remove();
+        } else {
+            ACTIVE_DISPATCH_CPU.set(cpu);
+        }
+    }
+
+    public static void exitDispatchContext() {
+        ACTIVE_DISPATCH_CPU.remove();
+    }
+
+    @Nullable
+    public static ICraftingCPU currentDispatchCpu() {
+        return ACTIVE_DISPATCH_CPU.get();
     }
 
     @Nullable

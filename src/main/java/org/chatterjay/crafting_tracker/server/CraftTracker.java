@@ -15,6 +15,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
 
 import javax.annotation.Nullable;
 
@@ -66,7 +67,13 @@ public class CraftTracker {
     private static final int MAX_MISSED = 10;
     private static final long COOLDOWN_MS = 1000;
     private static final long OUTPUT_GRACE_MS = 2500;
+    /** Allows a just-accepted ECO job to bridge the worker attachment callback. */
+    private static final long ECO_JOB_RECOVERY_WINDOW_MS = 2000;
+    private static final long ECO_JOB_ACTIVITY_TIMEOUT_MS = 6000;
     private static final long ECO_HANDOFF_GRACE_MS = 1500;
+    private static final long ECO_PENDING_DISPATCH_MAX_MS = 10_000;
+    /** Lifetime of a bus/job pair observed while an ECO fast path is being prepared. */
+    private static final long ECO_PREPARED_JOB_TTL_MS = 4000;
     private static final long MATRIX_HANDOFF_GRACE_MS = 1500;
     /** How often the reflective cluster scan may run for one matrix pattern block. */
     private static final long MATRIX_RECOVERY_INTERVAL_MS = 1000;
@@ -76,6 +83,13 @@ public class CraftTracker {
     private static final String ECO_CPU_CLASS = "cn.dancingsnow.neoecoae.api.me.ECOCraftingCPU";
     private static final String ECO_PATTERN_BUS_CLASS =
             "cn.dancingsnow.neoecoae.blocks.entity.crafting.ECOCraftingPatternBusBlockEntity";
+    /**
+     * NeoECO wraps a dispatch in a different type at every entry point and has renamed
+     * the members describing it more than once, so they are probed by name instead of
+     * being pinned to one release.
+     */
+    private static final String[] ECO_PATTERN_ACCESSORS = {"details", "pattern"};
+    private static final String[] ECO_OUTPUT_ACCESSORS = {"outputTotal", "outputsPerCraft", "outputs"};
     private static final String TRINITY_CPU_CLASS =
             "com.fish_dan_.data_energistics.common.crafting.trinity.execution.cpu.TrinityDataCoreVirtualCpu";
     private static final String TRINITY_PATTERN_CORE_CLASS =
@@ -103,11 +117,23 @@ public class CraftTracker {
     private static final Map<ICraftingProvider, ProviderCraft> currentProviderCrafts =
             java.util.Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<BlockPos, Map<Object, ProviderCraft>> currentEcoBusCrafts = new HashMap<>();
+    /** Last accepted ECO job per physical bus; survives worker clear/reuse until completion. */
+    private static final Map<BlockPos, ProviderCraft> currentEcoBusJobs = new HashMap<>();
+    private static final Map<BlockPos, Long> ecoBusJobAcceptedAtMs = new HashMap<>();
+    private static final Map<BlockPos, Long> ecoBusJobLastActivityMs = new HashMap<>();
+    /**
+     * Bus/job pairs observed while NeoECO prepares a fast path. They are only a fallback:
+     * some entry points start the worker without ever calling back into the bus.
+     */
+    private static final Map<BlockPos, ProviderCraft> currentEcoPreparedJobs = new HashMap<>();
+    private static final Map<BlockPos, Long> ecoPreparedJobAtMs = new HashMap<>();
     private static final Map<Object, BlockPos> ecoThreadBusPositions = new IdentityHashMap<>();
     private static final Map<Object, Integer> ecoThreadProgress = new IdentityHashMap<>();
     private static final Map<BlockPos, Long> ecoBusHandoffUntilMs = new HashMap<>();
     private static final ThreadLocal<Deque<EcoBusDispatch>> ecoBusDispatches =
             ThreadLocal.withInitial(ArrayDeque::new);
+    private static final Map<UUID, Deque<EcoBusDispatch>> pendingEcoDispatches =
+            new ConcurrentHashMap<>();
     private static final Map<BlockPos, Map<Object, ProviderCraft>> currentMatrixPatternCrafts = new HashMap<>();
     private static final Map<BlockPos, MatrixHandoff> matrixPatternHandoffs = new HashMap<>();
     private static final Map<BlockPos, Long> matrixRecoveryAtMs = new HashMap<>();
@@ -130,7 +156,10 @@ public class CraftTracker {
 
     private record OutputItem(ResourceLocation id, int type) {}
     private record ProviderCraft(ResourceLocation outputId, @Nullable UUID jobId) {}
-    private record EcoBusDispatch(BlockPos busPosition, ProviderCraft craft) {}
+    /** One ECO dispatch scope; the payload is null when the wrapper could not be read. */
+    private record EcoBusDispatch(BlockPos busPosition, @Nullable ProviderCraft craft, long createdAtMs) {}
+    /** Placeholder that bridges the gap between an accepted dispatch and its worker callback. */
+    private record EcoDispatchMarker(UUID jobId, long createdAtMs) {}
     private record MatrixPatternDispatch(BlockPos patternPosition, ProviderCraft craft) {}
     private record MatrixHandoff(ProviderCraft craft, long untilMs) {}
     private record AdjacentActivity(boolean active, String detail) {
@@ -238,11 +267,20 @@ public class CraftTracker {
     }
 
     private static Object resolveMethod(Class<?> type, String methodName, Class<?>[] parameterTypes) {
+        Method method;
         try {
-            return type.getMethod(methodName, parameterTypes);
+            method = type.getMethod(methodName, parameterTypes);
         } catch (NoSuchMethodException | RuntimeException missing) {
             return ABSENT_MEMBER;
         }
+        try {
+            // Optional integrations declare public members on package-private records and
+            // wrappers; without this the lookup would succeed but every call would fail.
+            method.setAccessible(true);
+        } catch (RuntimeException ignored) {
+            // A lookup that cannot be opened is still worth attempting.
+        }
+        return method;
     }
 
     private static Object invokeNoArg(Object target, String methodName) {
@@ -340,16 +378,12 @@ public class CraftTracker {
             return asPatternList(invokeNoArg(invokeNoArg(be, "getLogic"), "getAvailablePatterns"));
         }
         if (isEcoPatternBus(be)) {
-            // getAvailablePatterns() is a cluster-wide merged list. A physical bus must only
-            // be matched against the patterns stored in that particular block entity.
-            Object patterns = invokeNoArg(be, "getLocalAvailablePatterns");
-            if (patterns instanceof List<?> list) {
-                List<IPatternDetails> result = new ArrayList<>();
-                for (Object pattern : list) {
-                    if (pattern instanceof IPatternDetails details) result.add(details);
-                }
-                return result;
-            }
+            // NeoECO keeps one bus catalog per block entity, so getAvailablePatterns() is
+            // already the list of patterns stored in this particular bus. Older builds
+            // named the same list getLocalAvailablePatterns(), so both are probed.
+            List<IPatternDetails> patterns = asPatternList(invokeNoArg(be, "getLocalAvailablePatterns"));
+            if (patterns.isEmpty()) patterns = asPatternList(invokeNoArg(be, "getAvailablePatterns"));
+            return patterns;
         }
         return List.of();
     }
@@ -503,55 +537,220 @@ public class CraftTracker {
 
     /** Records an ECO bus dispatch with its job id when the bus accepted the execution. */
     public static void recordEcoPatternBusPush(Object patternBus, Object execution, @Nullable UUID jobId) {
-        if (!(patternBus instanceof ICraftingProvider provider) || execution == null) return;
-        try {
-            Object details = invokeNoArg(execution, "details");
-            if (details instanceof IPatternDetails patternDetails) {
-                recordProviderPatternPush(provider, patternDetails, jobId);
-            }
-        } catch (RuntimeException ignored) {
-            // NeoECO is optional and its execution wrapper can be unavailable during shutdown.
+        recordEcoBusCraft(patternBus, ecoDetails(execution), ecoCraft(execution, jobId), "push.accepted");
+    }
+
+    /** Records the AE2 provider push, which hands the pattern over directly. */
+    public static void recordEcoProviderPatternBusPush(Object patternBus, IPatternDetails details,
+                                                       @Nullable UUID jobId) {
+        recordEcoBusCraft(patternBus, details, craftOf(details, jobId), "push.accepted.provider");
+    }
+
+    /**
+     * Remembers that a physical bus owns a job. NeoECO reuses its worker lanes, and the
+     * worker callback can arrive ticks after the dispatch, so the bus keeps the job until
+     * the execution itself is gone instead of until the worker is released.
+     */
+    private static void recordEcoBusCraft(Object patternBus, @Nullable IPatternDetails details,
+                                          @Nullable ProviderCraft craft, String phase) {
+        if (!(patternBus instanceof BlockEntity be) || craft == null) return;
+        if (patternBus instanceof ICraftingProvider provider && details != null) {
+            recordProviderPatternPush(provider, details, craft.jobId());
         }
+
+        BlockPos pos = be.getBlockPos();
+        long now = System.currentTimeMillis();
+        Map<Object, ProviderCraft> executions = currentEcoBusCrafts.get(pos);
+        boolean alreadyAttached = executions != null
+                && executions.values().stream().anyMatch(value -> sameCraft(value, craft));
+        if (!alreadyAttached) {
+            currentEcoBusCrafts
+                    .computeIfAbsent(pos, ignored -> new IdentityHashMap<>())
+                    .put(new EcoDispatchMarker(craft.jobId(), now), craft);
+            markHighlightStateChanged();
+        }
+        currentEcoBusJobs.put(pos, craft);
+        ecoBusJobAcceptedAtMs.put(pos, now);
+        ecoBusJobLastActivityMs.put(pos, now);
+        seedEcoHighlightEntry(pos, craft, phase);
+        ModLogger.debug("ECO highlight push accepted phase={} pos={} jobId={} outputId={} mapEntries={}",
+                phase, pos, craft.jobId(), craft.outputId(),
+                currentEcoBusCrafts.getOrDefault(pos, Map.of()).size());
+    }
+
+    private static boolean sameCraft(@Nullable ProviderCraft first, ProviderCraft second) {
+        return first != null
+                && first.outputId().equals(second.outputId())
+                && java.util.Objects.equals(first.jobId(), second.jobId());
+    }
+
+    /**
+     * Resolves the dispatch an ECO wrapper describes. The wrapper type differs per entry
+     * point and its members were renamed between releases, so both the pattern and the
+     * produced stacks are probed by name and misses are cached.
+     */
+    @Nullable
+    private static ProviderCraft ecoCraft(Object execution, @Nullable UUID jobId) {
+        if (execution == null) return null;
+        UUID resolvedJob = jobId != null ? jobId : extractEcoJobId(execution);
+        IPatternDetails details = ecoDetails(execution);
+        if (details != null) return craftOf(details, resolvedJob);
+        for (String accessor : ECO_OUTPUT_ACCESSORS) {
+            Object outputs = invokeNoArg(execution, accessor);
+            if (!(outputs instanceof Iterable<?> iterable)) continue;
+            for (Object value : iterable) {
+                if (value instanceof GenericStack stack && stack.what() != null) {
+                    return new ProviderCraft(stack.what().getId(), resolvedJob);
+                }
+            }
+        }
+        return null;
+    }
+
+    @Nullable
+    private static IPatternDetails ecoDetails(Object execution) {
+        if (execution instanceof IPatternDetails details) return details;
+        if (execution == null) return null;
+        for (String accessor : ECO_PATTERN_ACCESSORS) {
+            Object value = invokeNoArg(execution, accessor);
+            if (value instanceof IPatternDetails details) return details;
+        }
+        return null;
+    }
+
+    @Nullable
+    private static ProviderCraft craftOf(@Nullable IPatternDetails details, @Nullable UUID jobId) {
+        if (details == null) return null;
+        GenericStack output = details.getPrimaryOutput();
+        if (output == null || output.what() == null) return null;
+        return new ProviderCraft(output.what().getId(), jobId);
+    }
+
+    /**
+     * Remembers the bus a fast path was prepared from. Some NeoECO entry points start the
+     * worker directly from the preparation, so the bus never appears in the accepting call.
+     */
+    public static void noteEcoFastPathPreparation(Object patternBus, Object context) {
+        if (!(patternBus instanceof BlockEntity be) || context == null) return;
+        UUID jobId = extractEcoJobId(context);
+        if (jobId == null) return;
+        ProviderCraft craft = ecoCraft(context, jobId);
+        if (craft == null) return;
+        BlockPos pos = be.getBlockPos();
+        currentEcoPreparedJobs.put(pos, craft);
+        ecoPreparedJobAtMs.put(pos, System.currentTimeMillis());
+        ModLogger.debugThrottled("eco.fastpath.prepare." + pos.asLong(), CTConfig.debugLogIntervalTicks,
+                "ECO highlight fastpath.prepare pos={} jobId={} outputId={}",
+                pos, jobId, craft.outputId());
     }
 
     /** Opens a dispatch scope so the ECO worker thread can be tied to its source FD bus. */
     public static void beginEcoPatternBusPush(Object patternBus, Object execution, @Nullable UUID jobId) {
-        if (!(patternBus instanceof BlockEntity be) || execution == null) return;
-        // ECO's execution type is optional at runtime.
-        Object details = invokeNoArg(execution, "details");
-        if (details instanceof IPatternDetails patternDetails) {
-            GenericStack output = patternDetails.getPrimaryOutput();
-            if (output != null && output.what() != null) {
-                ecoBusDispatches.get().push(new EcoBusDispatch(
-                        be.getBlockPos(), new ProviderCraft(output.what().getId(), jobId)));
-            }
-        }
+        beginEcoDispatch(patternBus, ecoCraft(execution, jobId));
     }
 
-    /** Opens a dispatch scope for ECO's fast-path batch request. */
+    /** Opens a dispatch scope for NeoECO's batch fast-path request. */
     public static void beginEcoBatchPatternBusPush(Object patternBus, Object request) {
-        if (!(patternBus instanceof BlockEntity be) || request == null) return;
-        try {
-            Object details = invokeNoArg(request, "details");
-            Object job = invokeNoArg(request, "craftingJobId");
-            UUID jobId = job instanceof UUID id ? id : null;
-            if (details instanceof IPatternDetails patternDetails) {
-                GenericStack output = patternDetails.getPrimaryOutput();
-                if (output != null && output.what() != null) {
-                    ecoBusDispatches.get().push(new EcoBusDispatch(
-                            be.getBlockPos(), new ProviderCraft(output.what().getId(), jobId)));
-                }
-            }
-        } catch (RuntimeException ignored) {
-            // ECO's batch request is optional at runtime.
+        beginEcoDispatch(patternBus, ecoCraft(request, null));
+    }
+
+    public static void beginEcoVirtualBatchPatternBusPush(Object patternBus, Object execution) {
+        beginEcoDispatch(patternBus, ecoCraft(execution, null));
+    }
+
+    public static void beginEcoExactVirtualBatchPatternBusPush(Object patternBus, Object recipe,
+                                                                @Nullable UUID jobId) {
+        beginEcoDispatch(patternBus, ecoCraft(recipe, jobId));
+    }
+
+    /** Opens a dispatch scope for the AE2 provider push, which hands the pattern over directly. */
+    public static void beginEcoProviderPatternBusPush(Object patternBus, IPatternDetails details,
+                                                      @Nullable UUID jobId) {
+        beginEcoDispatch(patternBus, craftOf(details, jobId));
+    }
+
+    /**
+     * Every begin pushes exactly one frame, including when the payload could not be read.
+     * NeoECO keeps entry points that no longer carry a dispatch - its batch request is an
+     * empty marker in current builds - and an end that popped unconditionally would throw
+     * away the frame of the scope around it.
+     */
+    private static void beginEcoDispatch(Object patternBus, @Nullable ProviderCraft craft) {
+        if (!(patternBus instanceof BlockEntity be)) return;
+        EcoBusDispatch dispatch = new EcoBusDispatch(
+                be.getBlockPos(), craft, System.currentTimeMillis());
+        ecoBusDispatches.get().push(dispatch);
+        if (craft != null) {
+            rememberPendingEcoDispatch(dispatch);
+            ModLogger.debug("ECO highlight push.begin pos={} jobId={} outputId={} thread={}",
+                    be.getBlockPos(), craft.jobId(), craft.outputId(),
+                    Thread.currentThread().getName());
         }
     }
 
     /** Closes the dispatch scope after ECO has accepted or rejected the pattern. */
-    public static void endEcoPatternBusPush() {
+    public static void endEcoPatternBusPush(boolean accepted) {
         Deque<EcoBusDispatch> dispatches = ecoBusDispatches.get();
-        if (!dispatches.isEmpty()) dispatches.pop();
+        if (dispatches.isEmpty()) {
+            ecoBusDispatches.remove();
+            return;
+        }
+
+        EcoBusDispatch dispatch = dispatches.pop();
+        ProviderCraft craft = dispatch.craft();
+        if (craft != null) {
+            ModLogger.debug("ECO highlight push.end accepted={} pos={} jobId={} outputId={} thread={}",
+                    accepted, dispatch.busPosition(), craft.jobId(), craft.outputId(),
+                    Thread.currentThread().getName());
+            if (!accepted) {
+                forgetPendingEcoDispatch(dispatch);
+                removeEcoDispatchMarkers(dispatch.busPosition(), craft.jobId());
+                ProviderCraft current = currentEcoBusJobs.get(dispatch.busPosition());
+                Map<Object, ProviderCraft> executions = currentEcoBusCrafts.get(dispatch.busPosition());
+                if (current != null && craft.jobId() != null
+                        && craft.jobId().equals(current.jobId())
+                        && (executions == null || executions.isEmpty())) {
+                    currentEcoBusJobs.remove(dispatch.busPosition());
+                    ecoBusJobAcceptedAtMs.remove(dispatch.busPosition());
+                    ecoBusJobLastActivityMs.remove(dispatch.busPosition());
+                    markHighlightStateChanged();
+                    ModLogger.debug("ECO highlight job.clear pos={} jobId={} reason=push_rejected",
+                            dispatch.busPosition(), current.jobId());
+                }
+            }
+        }
         if (dispatches.isEmpty()) ecoBusDispatches.remove();
+    }
+
+    public static void recordEcoVirtualPatternBusPush(Object patternBus, Object execution) {
+        recordEcoBusCraft(patternBus, ecoDetails(execution), ecoCraft(execution, null),
+                "push.accepted.virtual");
+    }
+
+    public static void recordEcoExactVirtualPatternBusPush(Object patternBus, Object recipe,
+                                                            @Nullable UUID jobId) {
+        recordEcoBusCraft(patternBus, ecoDetails(recipe), ecoCraft(recipe, jobId),
+                "push.accepted.exact");
+    }
+
+    private static void rememberPendingEcoDispatch(EcoBusDispatch dispatch) {
+        ProviderCraft craft = dispatch.craft();
+        UUID jobId = craft == null ? null : craft.jobId();
+        if (jobId != null) {
+            pendingEcoDispatches.computeIfAbsent(jobId, ignored -> new ConcurrentLinkedDeque<>())
+                    .addLast(dispatch);
+        }
+    }
+
+    private static void forgetPendingEcoDispatch(EcoBusDispatch dispatch) {
+        ProviderCraft craft = dispatch.craft();
+        UUID jobId = craft == null ? null : craft.jobId();
+        if (jobId == null) return;
+        Deque<EcoBusDispatch> pending = pendingEcoDispatches.get(jobId);
+        if (pending != null) {
+            pending.removeFirstOccurrence(dispatch);
+            if (pending.isEmpty()) pendingEcoDispatches.remove(jobId, pending);
+        }
     }
 
     /** Opens a scope that connects an ExtendedAE matrix worker to its physical pattern core. */
@@ -692,24 +891,148 @@ public class CraftTracker {
     }
 
     /** Binds a newly started ECO worker thread to the FD bus that dispatched it. */
-    public static void attachEcoThreadExecution(Object ecoThread) {
+    public static void attachEcoThreadExecution(Object ecoThread, @Nullable UUID jobId) {
         if (ecoThread == null) return;
+        UUID resolvedJob = jobId != null ? jobId : ecoThreadJobId(ecoThread);
         EcoBusDispatch dispatch = ecoBusDispatches.get().peek();
-        if (dispatch == null) return;
+        if (dispatch != null && dispatch.craft() == null) dispatch = null;
+        boolean fromPending = false;
+        if (dispatch == null && resolvedJob != null) {
+            Deque<EcoBusDispatch> pending = pendingEcoDispatches.get(resolvedJob);
+            dispatch = pending == null ? null : pending.pollFirst();
+            fromPending = dispatch != null;
+            if (pending != null && pending.isEmpty()) pendingEcoDispatches.remove(resolvedJob, pending);
+        }
+        if (dispatch == null && resolvedJob != null) {
+            BlockPos recoveredBus = findEcoBusForJob(ecoThread, resolvedJob);
+            ProviderCraft recoveredCraft = recoveredBus == null ? null : currentEcoBusJobs.get(recoveredBus);
+            if (recoveredCraft == null && recoveredBus != null) {
+                recoveredCraft = currentEcoPreparedJobs.get(recoveredBus);
+            }
+            if (recoveredBus != null && recoveredCraft != null) {
+                dispatch = new EcoBusDispatch(recoveredBus, recoveredCraft, System.currentTimeMillis());
+                fromPending = true;
+                ModLogger.debug("ECO highlight worker.attach_recovered pos={} jobId={} worker={} thread={}",
+                        recoveredBus, resolvedJob, System.identityHashCode(ecoThread),
+                        Thread.currentThread().getName());
+            }
+        }
+        if (dispatch == null) {
+            ModLogger.debug("ECO highlight worker.attach_miss jobId={} worker={} pendingJobs={} thread={}",
+                    resolvedJob, System.identityHashCode(ecoThread), pendingEcoDispatches.keySet(),
+                    Thread.currentThread().getName());
+            return;
+        }
+        if (!fromPending) forgetPendingEcoDispatch(dispatch);
+        ModLogger.debug("ECO highlight worker.attach pos={} jobId={} worker={} pending={} thread={}",
+                dispatch.busPosition(), dispatch.craft().jobId(), System.identityHashCode(ecoThread),
+                fromPending, Thread.currentThread().getName());
         currentEcoBusCrafts
                 .computeIfAbsent(dispatch.busPosition(), ignored -> new IdentityHashMap<>())
                 .put(ecoThread, dispatch.craft());
+        ecoBusJobLastActivityMs.put(dispatch.busPosition(), System.currentTimeMillis());
+        removeEcoDispatchMarkers(dispatch.busPosition(), dispatch.craft().jobId());
         ecoThreadBusPositions.put(ecoThread, dispatch.busPosition());
         ecoThreadProgress.remove(ecoThread);
         ecoBusHandoffUntilMs.remove(dispatch.busPosition());
         markHighlightStateChanged();
 
-        // ECO keeps a physical pattern bus busy across multiple worker runs. A new
-        // worker start is the reliable boundary for a fresh execution interval.
-        // A worker may start between periodic scans. Seed the entry directly so
-        // the first highlight packet cannot miss this execution window.
-        TrackerEntry entry = entries.computeIfAbsent(dispatch.busPosition(), ignored -> new TrackerEntry(0));
+        seedEcoHighlightEntry(dispatch.busPosition(), dispatch.craft(), "worker.start");
+    }
+
+    public static void attachEcoThreadExecution(Object ecoThread) {
+        attachEcoThreadExecution(ecoThread, null);
+    }
+
+    /**
+     * Reads the job an ECO worker owns. NeoECO starts some work kinds without passing a
+     * job id to the callback, and the worker work record is not always reachable, so the
+     * live snapshot - which exposes the job for every work kind - is the source of truth.
+     */
+    @Nullable
+    public static UUID ecoThreadJobId(Object ecoThread) {
+        Object snapshot = invokeNoArg(ecoThread, "createSnapshot");
+        Object value = snapshot == null ? null : invokeNoArg(snapshot, "craftingJobId");
+        if (value instanceof UUID id) return id;
+        return extractEcoJobId(ecoThread);
+    }
+
+    @Nullable
+    public static UUID extractEcoJobId(Object work) {
+        if (work == null) return null;
+        Object value = invokeNoArg(work, "craftingJobId");
+        if (!(value instanceof UUID)) value = invokeNoArg(work, "jobId");
+        return value instanceof UUID id ? id : null;
+    }
+
+    private static void removeEcoDispatchMarkers(BlockPos busPosition, @Nullable UUID jobId) {
+        if (jobId == null) return;
+        Map<Object, ProviderCraft> executions = currentEcoBusCrafts.get(busPosition);
+        if (executions == null) return;
+        executions.entrySet().removeIf(entry ->
+                entry.getKey() instanceof EcoDispatchMarker marker && jobId.equals(marker.jobId()));
+        if (executions.isEmpty()) currentEcoBusCrafts.remove(busPosition);
+    }
+
+    @Nullable
+    private static BlockPos findEcoBusForJob(Object ecoThread, UUID jobId) {
+        ResourceLocation outputId = null;
+        Object displayed = invokeNoArg(ecoThread, "getDisplayedOutputKey");
+        if (displayed instanceof AEKey key) outputId = key.getId();
+
+        BlockPos accepted = bestEcoBusForJob(currentEcoBusJobs, ecoBusJobLastActivityMs, jobId, outputId);
+        if (accepted != null) return accepted;
+        // The exact virtual fast path starts the worker straight from the prepared offer
+        // without dispatching through the bus, so the preparation is the only owner link.
+        return bestEcoBusForJob(currentEcoPreparedJobs, ecoPreparedJobAtMs, jobId, outputId);
+    }
+
+    /**
+     * Picks the bus that owns a job, preferring an exact match on the worker's displayed
+     * output and falling back to the most recently active candidate.
+     */
+    @Nullable
+    private static BlockPos bestEcoBusForJob(Map<BlockPos, ProviderCraft> jobs,
+                                             Map<BlockPos, Long> activityByPos,
+                                             UUID jobId, @Nullable ResourceLocation outputId) {
+        BlockPos fallback = null;
+        long newest = Long.MIN_VALUE;
+        for (Map.Entry<BlockPos, ProviderCraft> entry : jobs.entrySet()) {
+            ProviderCraft craft = entry.getValue();
+            if (!jobId.equals(craft.jobId())) continue;
+            if (outputId != null && outputId.equals(craft.outputId())) return entry.getKey();
+            long activity = activityByPos.getOrDefault(entry.getKey(), 0L);
+            if (activity > newest) {
+                newest = activity;
+                fallback = entry.getKey();
+            }
+        }
+        return fallback;
+    }
+
+    /** Removes a completed ECO execution as soon as its worker thread becomes free. */
+    public static void clearEcoThreadExecution(Object ecoThread) {
+        BlockPos busPosition = ecoThreadBusPositions.remove(ecoThread);
+        ModLogger.debug("ECO highlight worker.clear worker={} pos={}",
+                System.identityHashCode(ecoThread), busPosition);
+        if (busPosition == null) return;
+        ecoThreadProgress.remove(ecoThread);
+        Map<Object, ProviderCraft> executions = currentEcoBusCrafts.get(busPosition);
+        if (executions == null) return;
+        executions.remove(ecoThread);
+        if (executions.isEmpty()) {
+            currentEcoBusCrafts.remove(busPosition);
+            startEcoBusHandoffGrace(busPosition);
+            ModLogger.debug("ECO highlight worker.idle pos={} jobId={} reason=worker_empty",
+                    busPosition, currentEcoBusJobs.get(busPosition) == null
+                            ? null : currentEcoBusJobs.get(busPosition).jobId());
+        }
+    }
+
+    private static void seedEcoHighlightEntry(BlockPos pos, ProviderCraft craft, String phase) {
+        TrackerEntry entry = entries.computeIfAbsent(pos, ignored -> new TrackerEntry(0));
         long now = System.currentTimeMillis();
+        entry.sourceClass = ECO_PATTERN_BUS_CLASS;
         entry.busyStartMs = now;
         entry.lastBusyProgressMs = now;
         entry.activeStartMs = now;
@@ -719,25 +1042,11 @@ public class CraftTracker {
         entry.tentative = false;
         entry.missedCount = 0;
         entry.cooldownUntilMs = 0;
-        entry.currentCraftingId = dispatch.craft().outputId();
-        entry.outputs = List.of(buildOutputItem(dispatch.craft().outputId()));
-        debugProviderEvent("eco.worker_start", dispatch.busPosition(), entry, now,
-                "outputId=" + dispatch.craft().outputId()
-                        + " jobId=" + dispatch.craft().jobId());
-    }
-
-    /** Removes a completed ECO execution as soon as its worker thread becomes free. */
-    public static void clearEcoThreadExecution(Object ecoThread) {
-        BlockPos busPosition = ecoThreadBusPositions.remove(ecoThread);
-        if (busPosition == null) return;
-        ecoThreadProgress.remove(ecoThread);
-        Map<Object, ProviderCraft> executions = currentEcoBusCrafts.get(busPosition);
-        if (executions == null) return;
-        executions.remove(ecoThread);
-        if (executions.isEmpty()) {
-            currentEcoBusCrafts.remove(busPosition);
-            startEcoBusHandoffGrace(busPosition);
-        }
+        entry.currentCraftingId = craft.outputId();
+        entry.outputs = List.of(buildOutputItem(craft.outputId()));
+        markHighlightStateChanged();
+        debugProviderEvent("eco." + phase, pos, entry, now,
+                "jobId=" + craft.jobId() + " outputId=" + craft.outputId());
     }
 
     private static @Nullable ProviderCraft getEcoBusCraft(BlockPos busPosition) {
@@ -748,13 +1057,60 @@ public class CraftTracker {
         if (executions.isEmpty()) {
             currentEcoBusCrafts.remove(busPosition);
             startEcoBusHandoffGrace(busPosition);
+            ProviderCraft recovering = currentEcoBusJobs.get(busPosition);
+            long lastActivity = ecoBusJobLastActivityMs.getOrDefault(busPosition, 0L);
+            if (recovering != null && lastActivity != 0L
+                    && System.currentTimeMillis() - lastActivity <= ECO_JOB_ACTIVITY_TIMEOUT_MS) {
+                return recovering;
+            }
             return null;
         }
 
         // clearWork is the authoritative lifecycle boundary. ECO can report a
         // worker as idle for a tick while it is handing the next batch to the
         // same thread; polling isBusy here caused intermittent highlight loss.
-        return executions.values().iterator().next();
+        long now = System.currentTimeMillis();
+        // A marker only has to bridge acceptance and the worker callback. One that
+        // outlived that window belongs to a job that never attached, and leaving it in
+        // place would both keep the bus busy forever and let it shadow the next job.
+        executions.entrySet().removeIf(entry -> entry.getKey() instanceof EcoDispatchMarker marker
+                && now - marker.createdAtMs() > ECO_PENDING_DISPATCH_MAX_MS);
+        if (executions.isEmpty()) {
+            currentEcoBusCrafts.remove(busPosition);
+            startEcoBusHandoffGrace(busPosition);
+            return null;
+        }
+
+        ProviderCraft placeholder = null;
+        for (Map.Entry<Object, ProviderCraft> entry : executions.entrySet()) {
+            if (entry.getKey() instanceof EcoDispatchMarker) {
+                if (placeholder == null) placeholder = entry.getValue();
+                continue;
+            }
+            // A live worker always wins over a placeholder for another job.
+            return entry.getValue();
+        }
+        return placeholder;
+    }
+
+    private static @Nullable ProviderCraft getRecoveringEcoBusJob(BlockPos busPosition, long now) {
+        ProviderCraft craft = currentEcoBusJobs.get(busPosition);
+        long acceptedAt = ecoBusJobAcceptedAtMs.getOrDefault(busPosition, 0L);
+        long lastActivity = ecoBusJobLastActivityMs.getOrDefault(busPosition, acceptedAt);
+        long timeout = lastActivity == acceptedAt ? ECO_JOB_RECOVERY_WINDOW_MS : ECO_JOB_ACTIVITY_TIMEOUT_MS;
+        if (craft == null || lastActivity == 0L || now - lastActivity > timeout) {
+            if (craft != null) {
+                currentEcoBusJobs.remove(busPosition);
+                ecoBusJobAcceptedAtMs.remove(busPosition);
+                ecoBusJobLastActivityMs.remove(busPosition);
+                ModLogger.debugThrottled("eco.job.expire." + busPosition.asLong(),
+                        CTConfig.debugLogIntervalTicks,
+                        "ECO highlight job.expire pos={} jobId={} ageMs={}",
+                        busPosition, craft.jobId(), lastActivity == 0L ? -1 : now - lastActivity);
+            }
+            return null;
+        }
+        return craft;
     }
 
     private static @Nullable ProviderCraft getMatrixPatternCraft(BlockEntity matrix) {
@@ -916,7 +1272,10 @@ public class CraftTracker {
 
         boolean progressed = false;
         for (Object thread : executions.keySet()) {
-            Object value = invokeNoArg(thread, "getProgress");
+            // NeoECO exposes lane progress through its snapshot, not a getter.
+            Object snapshot = invokeNoArg(thread, "createSnapshot");
+            Object value = snapshot == null ? null : invokeNoArg(snapshot, "progress");
+            if (!(value instanceof Number)) value = invokeNoArg(thread, "getProgress");
             if (!(value instanceof Number number)) continue;
             int current = number.intValue();
             Integer previous = ecoThreadProgress.put(thread, current);
@@ -977,6 +1336,15 @@ public class CraftTracker {
         }
 
         long now = System.currentTimeMillis();
+        pendingEcoDispatches.entrySet().removeIf(entry -> {
+            entry.getValue().removeIf(dispatch -> now - dispatch.createdAtMs() > ECO_PENDING_DISPATCH_MAX_MS);
+            return entry.getValue().isEmpty();
+        });
+        ecoPreparedJobAtMs.entrySet().removeIf(entry -> {
+            if (now - entry.getValue() <= ECO_PREPARED_JOB_TTL_MS) return false;
+            currentEcoPreparedJobs.remove(entry.getKey());
+            return true;
+        });
         int radius = CTConfig.scanRadius;
         matrixRecoveryAtMs.entrySet().removeIf(entry -> now - entry.getValue() > MATRIX_RECOVERY_IDLE_MS);
 
@@ -1014,6 +1382,7 @@ public class CraftTracker {
         lastHighlightSnapshotRevisions.keySet().removeIf(playerId -> !trackingPlayerIds.contains(playerId));
 
         // Phase 1: every tick — refresh state for known entries + quick-check nearby for busy providers
+        clearDisconnectedEcoEntries(server, now);
         refreshEntries(server, now);
         quickScan(server, now, trackingPlayers);
 
@@ -1268,6 +1637,31 @@ public class CraftTracker {
                 }
             }
         }
+    }
+
+    /** Removes stale ECO highlights immediately when their physical bus loses its ME grid. */
+    private static void clearDisconnectedEcoEntries(MinecraftServer server, long now) {
+        entries.entrySet().removeIf(entry -> {
+            BlockPos pos = entry.getKey();
+            if (!ECO_PATTERN_BUS_CLASS.equals(entry.getValue().sourceClass)) return false;
+            BlockEntity bus = null;
+            for (ServerLevel level : server.getAllLevels()) {
+                if (!level.hasChunk(pos.getX() >> 4, pos.getZ() >> 4)) continue;
+                bus = level.getBlockEntity(pos);
+                if (bus != null) break;
+            }
+            if (!isEcoPatternBus(bus) || getGrid(bus) != null) return false;
+            currentEcoBusCrafts.remove(pos);
+            currentEcoBusJobs.remove(pos);
+            ecoBusJobAcceptedAtMs.remove(pos);
+            ecoBusJobLastActivityMs.remove(pos);
+            currentEcoPreparedJobs.remove(pos);
+            ecoPreparedJobAtMs.remove(pos);
+            currentProviderCrafts.remove(getCraftingProvider(bus));
+            markHighlightStateChanged();
+            ModLogger.debug("ECO highlight disconnected.clear pos={} now={} reason=grid_missing", pos, now);
+            return true;
+        });
     }
 
     private static void refreshEntries(MinecraftServer server, long now) {
@@ -1740,10 +2134,24 @@ public class CraftTracker {
             ResourceLocation providerCraftingId = null;
             if (isEcoPatternBus(be)) {
                 ProviderCraft recorded = getEcoBusCraft(be.getBlockPos());
-                if (recorded != null && containsPatternOutput(patterns, recorded.outputId())) {
+                boolean liveExecution = recorded != null;
+                if (recorded == null) {
+                    recorded = getRecoveringEcoBusJob(be.getBlockPos(), System.currentTimeMillis());
+                }
+                // A running worker is authoritative. The bus pattern list only has to
+                // confirm a remembered job that no worker is executing any more, which
+                // keeps a completed craft from being attributed to the wrong bus.
+                if (recorded != null && (liveExecution || patterns.isEmpty()
+                        || containsAnyPatternOutput(patterns, recorded.outputId()))) {
                     providerCraftingId = recorded.outputId();
                 }
-                if (!providerBusy && provider != null) currentProviderCrafts.remove(provider);
+                ModLogger.debugThrottled("eco.output." + be.getBlockPos().asLong(),
+                        CTConfig.debugLogIntervalTicks,
+                        "ECO highlight output.resolve pos={} providerBusy={} recorded={} currentId={} localPatterns={} mapEntries={}",
+                        be.getBlockPos(), providerBusy,
+                        recorded == null ? "none" : recorded.jobId() + "/" + recorded.outputId(),
+                        providerCraftingId, patterns.size(),
+                        currentEcoBusCrafts.getOrDefault(be.getBlockPos(), Map.of()).size());
             } else if (isMatrixSource(be)) {
                 ProviderCraft recorded = getMatrixPatternCraft(be);
                 if (recorded != null && containsPatternOutput(patterns, recorded.outputId())) {
@@ -1775,6 +2183,10 @@ public class CraftTracker {
                         results.add(item);
                     }
                 }
+            }
+            if (isEcoPatternBus(be) && providerCraftingId != null && results.isEmpty()) {
+                OutputItem fallback = buildOutputItem(providerCraftingId);
+                if (fallback != null) results.add(fallback);
             }
             ResourceLocation currentCraftingId = null;
             boolean adjacentMachineActive = be.getLevel() != null
@@ -1929,6 +2341,22 @@ public class CraftTracker {
         return false;
     }
 
+    /**
+     * Matches any output of a pattern, not only the primary one. NeoECO's virtual fast
+     * path reports the produced stacks of the whole craft, and a bus can be the owner of
+     * a pattern whose primary output is not the stack that is currently being counted.
+     */
+    private static boolean containsAnyPatternOutput(List<IPatternDetails> patterns, ResourceLocation outputId) {
+        for (IPatternDetails pattern : patterns) {
+            for (GenericStack output : pattern.getOutputs()) {
+                if (output != null && output.what() != null && output.what().getId().equals(outputId)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private static @Nullable GenericStackInv getReturnInventory(BlockEntity be) {
         PatternProviderLogicHost host = getPatternProviderHost(be);
         if (host != null) {
@@ -2003,6 +2431,11 @@ public class CraftTracker {
         currentProviderCrafts.clear();
         providerTransferProgress.clear();
         currentEcoBusCrafts.clear();
+        currentEcoBusJobs.clear();
+        ecoBusJobAcceptedAtMs.clear();
+        ecoBusJobLastActivityMs.clear();
+        currentEcoPreparedJobs.clear();
+        ecoPreparedJobAtMs.clear();
         ecoThreadBusPositions.clear();
         ecoThreadProgress.clear();
         ecoBusHandoffUntilMs.clear();
@@ -2077,6 +2510,10 @@ public class CraftTracker {
             currentEcoBusCrafts.values().forEach(executions ->
                     executions.entrySet().removeIf(entry -> jobId.equals(entry.getValue().jobId())));
             currentEcoBusCrafts.entrySet().removeIf(entry -> entry.getValue().isEmpty());
+            currentEcoBusJobs.entrySet().removeIf(entry -> jobId.equals(entry.getValue().jobId()));
+            ecoBusJobAcceptedAtMs.keySet().removeIf(pos -> !currentEcoBusJobs.containsKey(pos));
+            ecoBusJobLastActivityMs.keySet().removeIf(pos -> !currentEcoBusJobs.containsKey(pos));
+            markHighlightStateChanged();
             ecoThreadBusPositions.entrySet().removeIf(entry -> {
                 Map<Object, ProviderCraft> executions = currentEcoBusCrafts.get(entry.getValue());
                 return executions == null || !executions.containsKey(entry.getKey());
